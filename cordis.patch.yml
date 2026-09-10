@@ -1,0 +1,8 @@
+# dsh-learn-wiki — 边做边学知识库 bundle。
+# 通过 `dsh plugin --profile web add link:D:\Harness\dsh-learn-wiki` 注册。
+#
+# 注意：`- insert:` 条目即插件的挂载声明（id + name），加载器按 name 解析
+# 包并调用 apply()。空 patch 列表会导致 bundle 不挂载、agent 工具不注册。
+- insert:
+    - id: dsh-learn-wiki
+      name: 'dsh-learn-wiki'
