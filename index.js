@@ -133,8 +133,12 @@ export function apply(ctx, pluginConfig = {}) {
       signal?.throwIfAborted?.()
 
       if (t.bucket === 'miss') {
-        // 旋钮 B2：只入队，绝不在此处阻塞去联网
-        if (cfg.autoAcquire) { await appendGap(cfg.wikiRoot, { query, score: t.best, sessionId: agent?.id }); log('gap recorded, bucket=miss score=' + t.best) }
+        // 旋钮 B2：只入队，绝不在此处阻塞去联网。
+        // 但寒暄类短输入不是知识缺口，记进去只会污染队列并触发无意义联网。
+        if (cfg.autoAcquire && query.length >= cfg.minGapQueryChars) {
+          await appendGap(cfg.wikiRoot, { query, score: t.best, sessionId: agent?.id })
+          log('gap recorded, bucket=miss score=' + t.best)
+        }
         return decision
       }
 

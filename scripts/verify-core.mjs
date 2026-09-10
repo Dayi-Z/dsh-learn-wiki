@@ -1,6 +1,6 @@
 // 核心自检：解析 → 索引 → 打分 → 三分桶。
 // 跑在真实的 D:\Harness\dsh-wiki 上，而不是 fixture，确保格式约定与实物一致。
-import { loadPages, commitReadiness } from '../lib/wiki.js'
+import { loadPages, commitReadiness, deriveId, slugify } from '../lib/wiki.js'
 import { buildCorpus, scoreQuery, triage, recallable } from '../lib/recall.js'
 
 const ROOT = process.argv[2] || 'D:\\Harness\\dsh-wiki'
@@ -46,6 +46,15 @@ check('无关查询判为 miss', t2.bucket === 'miss', 'bucket=' + t2.bucket + '
 // 中文二元组分词确实产出 token
 const zhOnly = scoreQuery(corpus, '数据库崩溃恢复')
 check('纯中文查询能产出命中', zhOnly.length > 0, zhOnly.length + ' hit(s)')
+
+// ── id 派生：中文标题必须不碰撞（曾实现错，靠"slug 够长"判断，挡不住）──
+console.log('\n=== id 派生 ===')
+const a = deriveId(undefined, 'DSH 插件 link 安装的模块解析')
+const b = deriveId(undefined, 'DSH 插件 link 的加载顺序')
+check('中文标题派生 id 不碰撞', a !== b, a + ' vs ' + b)
+check('ascii 标题保持干净 slug', deriveId(undefined, 'Widget protocol framing') === 'widget-protocol-framing')
+check('显式 id 被尊重且不加哈希', deriveId('explicit-id', '任意中文标题') === 'explicit-id')
+check('空标题也有 id', deriveId(undefined, '').length > 0, deriveId(undefined, ''))
 
 console.log(failures === 0 ? '\nALL PASS' : '\n' + failures + ' FAILURE(S)')
 process.exit(failures === 0 ? 0 : 1)

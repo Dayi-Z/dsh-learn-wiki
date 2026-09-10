@@ -100,6 +100,45 @@ const { readGaps } = await import('../lib/acquire.js')
 const gaps = await readGaps(ROOT)
 check('未命中时记入 gap 队列', gaps.length === 1, JSON.stringify(gaps.map(g => ({ q: g.query.slice(0, 30), s: g.status }))))
 
+// ── 工具输出必须是 lossless JSON ──
+// 这是真踩过的坑：wiki_recall 在非 miss 分支返回了 `note: undefined`，
+// 运行时报 "tool ... returned invalid output: value is not lossless JSON"，
+// 整个工具不可用。所以对每个工具都做一次"JSON 往返必须等价"的检查。
+const findBadValue = (v, path = '$') => {
+  if (v === undefined) return path + ' = undefined'
+  if (typeof v === 'function') return path + ' = function'
+  if (v === null || typeof v !== 'object') return null
+  if (Array.isArray(v)) {
+    for (let i = 0; i < v.length; i++) { const b = findBadValue(v[i], path + '[' + i + ']'); if (b) return b }
+    return null
+  }
+  for (const [k, val] of Object.entries(v)) { const b = findBadValue(val, path + '.' + k); if (b) return b }
+  return null
+}
+const byName = Object.fromEntries(registered.map(t => [t.name, t]))
+const callTool = async (n, args) => {
+  const def = byName[n]
+  if (!def) return { label: n, ok: false, detail: '工具未注册' }
+  try {
+    const v = await def.execute(args, { signal: { throwIfAborted() {} } })
+    const bad = findBadValue(v)
+    const roundTrip = JSON.stringify(JSON.parse(JSON.stringify(v))) === JSON.stringify(v)
+    return { label: n, ok: !bad && roundTrip, detail: bad ? '含非法值 ' + bad : (roundTrip ? '' : 'JSON 往返不等价') }
+  } catch (e) { return { label: n, ok: false, detail: 'execute 抛异常: ' + e.message } }
+}
+
+console.log('\n=== 工具输出 lossless JSON ===')
+// 关键用例：走 hit 分支（就是当初带 note:undefined 崩掉的那条路径）
+for (const r of [
+  await callTool('wiki_recall', { query: 'Widget 协议的分帧和魔数是什么' }),
+  await callTool('wiki_recall', { query: '完全不相关的 kubernetes istio 问题' }),
+  await callTool('wiki_review', {}),
+  await callTool('wiki_learn', { title: '临时测试页', body: '内容', sources: 'https://e.com' }),
+  await callTool('wiki_commit', { id: '根本不存在的页面' }),
+]) {
+  check('输出合法: ' + r.label, r.ok, r.detail)
+}
+
 await rm(ROOT, { recursive: true, force: true })
 console.log(failures === 0 ? '\nALL PASS — 插件接线正确' : '\n' + failures + ' FAILURE(S)')
 process.exit(failures === 0 ? 0 : 1)
