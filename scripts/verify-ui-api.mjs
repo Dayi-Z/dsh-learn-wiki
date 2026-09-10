@@ -77,5 +77,64 @@ if (payload) {
 const nf = await call('/learn-wiki/nope')
 check('未知路径返回 404', nf.code === 404, 'code=' + nf.code)
 
+// ── 写路由：在**临时仓库**上测，不碰真实 wiki ──
+const T = '.tmp-ui-write'
+await rm(T, { recursive: true, force: true })
+const { ensureRepo, savePage } = await import('../lib/wiki.js')
+await ensureRepo(T)
+const stamp = new Date().toISOString()
+await savePage(T, {
+  id: 'writable', title: '可提交页', category: 'fact', confidence: 0.8,
+  sources: ['https://example.com/x'], tags: [], created: stamp, updated: stamp, hits: 0, body: '内容',
+}, { staged: true })
+await savePage(T, {
+  id: 'no-source', title: '无来源页', category: 'fact', confidence: 0.8,
+  sources: [], tags: [], created: stamp, updated: stamp, hits: 0, body: '内容',
+}, { staged: true })
+
+route = null
+mod.apply(ctxLike, { wikiRoot: T })
+
+function postCall(pathname, body) {
+  return new Promise((resolve) => {
+    let code = 0
+    const handlers = {}
+    const req = {
+      url: pathname, method: 'POST',
+      on: (ev, cb) => { handlers[ev] = cb; return req },
+      destroy: () => {},
+    }
+    const res = { writeHead: (c) => { code = c }, end: (b) => resolve({ code, body: b }) }
+    // 超时保护：否则一旦 handler 没调 end，测试会静默挂死（比失败更难查）
+    setTimeout(() => resolve({ code: -1, body: '(超时：handler 未响应)' }), 2000)
+    route.handler(req, res)
+    setTimeout(() => { handlers.data && handlers.data(JSON.stringify(body)); handlers.end && handlers.end() }, 0)
+  })
+}
+
+const c1 = await postCall('/learn-wiki/api/commit', { id: 'writable' })
+check('★ commit 有来源的暂存页成功', c1.code === 200 && JSON.parse(c1.body).ok === true,
+  'code=' + c1.code + ' ' + String(c1.body).slice(0, 120))
+
+const c2 = await postCall('/learn-wiki/api/commit', { id: 'no-source' })
+const c2j = JSON.parse(c2.body)
+check('★ 无 sources 被闸门拒绝（两段式的第二道闸）', c2.code === 409 && c2j.ok === false,
+  'code=' + c2.code + ' blockers=' + JSON.stringify(c2j.blockers))
+
+const c3 = await postCall('/learn-wiki/api/commit', { id: '根本不存在' })
+check('commit 未知 id 返回 404', c3.code === 404, 'code=' + c3.code)
+
+const c4 = await postCall('/learn-wiki/api/capabilities', { enabled: true, explicitOnly: ['workflow', 'ralph'] })
+check('★ 能力包配置写回成功', c4.code === 200 && JSON.parse(c4.body).ok === true, String(c4.body).slice(0, 140))
+const { readFile: rf } = await import('node:fs/promises')
+const saved = JSON.parse(await rf(join(T, 'wiki.config.json'), 'utf8'))
+check('★ 配置确实落进 wiki.config.json', JSON.stringify(saved.capabilities.explicitOnly) === '["workflow","ralph"]',
+  JSON.stringify(saved.capabilities))
+
+const c5 = await postCall('/learn-wiki/api/capabilities', { bad: 1 })
+check('非法载荷返回 400', c5.code === 400, 'code=' + c5.code)
+
+await rm(T, { recursive: true, force: true })
+
 console.log(failures === 0 ? '\nALL PASS — UI 接口正确' : '\n' + failures + ' FAILURE(S)')
 process.exit(failures === 0 ? 0 : 1)

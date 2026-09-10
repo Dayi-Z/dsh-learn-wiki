@@ -13,7 +13,9 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { createUserMessage as hostCreateUserMessage } from '@deepseek-ai/dsh-llm'
 import { loadConfig, DEFAULTS } from './lib/config.js'
-import { loadPages, ensureRepo } from './lib/wiki.js'
+import { loadPages, ensureRepo, savePage, commitReadiness } from './lib/wiki.js'
+import { readFile, writeFile, unlink } from 'node:fs/promises'
+import { join } from 'node:path'
 import { buildCorpus, scoreQuery, triage, recallable, looksLikeGap } from './lib/recall.js'
 import { appendGap, runAcquisition, readGaps } from './lib/acquire.js'
 import { createLlm } from './lib/llm.js'
@@ -243,6 +245,53 @@ export function apply(ctx, pluginConfig = {}) {
           res.end(body)
         }
         const url = new URL(req.url, 'http://127.0.0.1')
+        const readBody = () => new Promise((resolve) => {
+          let b = ''
+          req.on('data', (c) => { b += c; if (b.length > 1e6) req.destroy() })
+          req.on('end', () => { try { resolve(JSON.parse(b || '{}')) } catch { resolve(null) } })
+          req.on('error', () => resolve(null))
+        })
+
+        // ── 写路径 1：改能力包配置 ──
+        // 写进 <wikiRoot>/wiki.config.json（可 git、可手改），下次装配即生效。
+        if (url.pathname === '/learn-wiki/api/capabilities' && req.method === 'POST') {
+          const body = await readBody()
+          if (!body || !Array.isArray(body.explicitOnly)) { send(400, { ok: false, error: '需要 { explicitOnly: string[] }' }); return }
+          const cfgPath = join(cfg.wikiRoot, 'wiki.config.json')
+          let fileCfg = {}
+          try { fileCfg = JSON.parse(await readFile(cfgPath, 'utf8')) } catch { /* 首次创建 */ }
+          fileCfg.capabilities = {
+            ...(fileCfg.capabilities ?? {}),
+            enabled: body.enabled !== false,
+            explicitOnly: body.explicitOnly.filter(n => typeof n === 'string' && n),
+            diagnostics: Array.isArray(body.diagnostics) ? body.diagnostics.filter(n => typeof n === 'string' && n) : (fileCfg.capabilities?.diagnostics ?? []),
+            deny: fileCfg.capabilities?.deny ?? [],
+          }
+          await writeFile(cfgPath, JSON.stringify(fileCfg, null, 2) + '\n', 'utf8')
+          log('ui: 能力包配置已更新 -> ' + JSON.stringify(fileCfg.capabilities.explicitOnly))
+          send(200, { ok: true, saved: fileCfg.capabilities, note: '已写入 wiki.config.json，下一次装配生效' })
+          return
+        }
+
+        // ── 写路径 2：commit 一个暂存页 ──
+        // 复用与 wiki_commit 工具同一套闸门（无 sources 不许 commit）。
+        if (url.pathname === '/learn-wiki/api/commit' && req.method === 'POST') {
+          const body = await readBody()
+          const id = body && body.id
+          if (!id) { send(400, { ok: false, error: '需要 { id }' }); return }
+          const all = (await loadPages(cfg.wikiRoot)).pages
+          const page = all.find(p => p.id === id && p.status === 'staged')
+          if (!page) { send(404, { ok: false, error: 'staged 中找不到: ' + id }); return }
+          const ready = commitReadiness(page)
+          if (!ready.ready) { send(409, { ok: false, error: '不满足 commit 条件', blockers: ready.blockers }); return }
+          page.updated = new Date().toISOString()
+          const file = await savePage(cfg.wikiRoot, page, { staged: false })
+          try { await unlink(page.path) } catch { /* staged 原文件删不掉不致命 */ }
+          log('ui: 已 commit ' + id)
+          send(200, { ok: true, id, path: file })
+          return
+        }
+
         if (url.pathname !== '/learn-wiki/api/state') { send(404, { ok: false, error: 'not found' }); return }
 
         const { pages } = await loadPages(cfg.wikiRoot)

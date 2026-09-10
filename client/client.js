@@ -74,6 +74,14 @@ window.__ModuleLoader__.load({
       styled = true
     }
 
+    function post(path, body) {
+      return fetch(path, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body || {}),
+      }).then(function (r) { return r.json().then(function (j) { return { status: r.status, j: j } }) })
+    }
+
     var CLASS_COLOR = {
       confirmed: 'lw-c-confirmed', suspect: 'lw-c-suspect', 'suspect-watch': 'lw-c-watch',
       dead: 'lw-c-dead', new: 'lw-c-new', unconfirmed: 'lw-c-unconfirmed',
@@ -101,6 +109,28 @@ window.__ModuleLoader__.load({
       var deniedItems = items.filter(function (i) { return i.denied })
       var liveItems = items.filter(function (i) { return !i.denied })
       var approx = items.reduce(function (a, i) { return a + (i.approxTokens || 0) }, 0)
+
+      // 勾选即写回 wiki.config.json。UI 只改 explicitOnly（"显式专用"那一档），
+      // diagnostics/deny 保持不动 —— 免得界面一勾就把手写的精细配置冲掉。
+      var busyState = useState(null)
+      var busy = busyState[0], setBusy = busyState[1]
+      var msgState = useState(null)
+      var msg = msgState[0], setMsg = msgState[1]
+      var toggle = function (name, nextDenied) {
+        var cur = (cap.configuredDeny || []).slice()
+        var idx = cur.indexOf(name)
+        if (nextDenied && idx < 0) cur.push(name)
+        if (!nextDenied && idx >= 0) cur.splice(idx, 1)
+        setBusy(name)
+        post('/learn-wiki/api/capabilities', { enabled: true, explicitOnly: cur })
+          .then(function (r) {
+            setBusy(null)
+            setMsg(r.j && r.j.ok ? '已保存，下一次装配生效' : '保存失败：' + ((r.j && r.j.error) || r.status))
+            props.onChanged && props.onChanged()
+          })
+          .catch(function (e) { setBusy(null); setMsg('保存失败：' + String(e.message || e)) })
+      }
+
       return h('div', null,
         h('div', { className: 'lw-kpi' },
           h('div', null, '目录工具', h('b', null, cap.catalog ? cap.catalog.total : '—')),
@@ -108,6 +138,7 @@ window.__ModuleLoader__.load({
           h('div', null, '保留', h('b', null, liveItems.length)),
           h('div', null, '目录 token 估算', h('b', null, approx ? '~' + approx : '—'))
         ),
+        msg ? h('div', { className: 'lw-row lw-c-confirmed' }, msg) : null,
         cap.catalog && cap.catalog.capturedAt
           ? null
           : h('div', { className: 'lw-empty' }, '目录快照尚未捕获（需要先有一次会话，能力包装配时才会读到完整目录）'),
@@ -126,10 +157,34 @@ window.__ModuleLoader__.load({
             : h('div', { className: 'lw-empty' }, '（无）')
         ),
         h('div', { className: 'lw-sec' },
-          h('div', { className: 'lw-sech' }, '保留工具（' + liveItems.length + '）'),
-          liveItems.slice(0, 80).map(function (i) { return h('div', { className: 'lw-row', key: i.name },
-            h('span', { className: 'lw-mono lw-grow' }, i.name),
-            h('span', { className: 'lw-num' }, '~' + i.approxTokens)) })
+          h('div', { className: 'lw-sech' }, '保留工具（' + liveItems.length + '）— 勾选即裁掉'),
+          liveItems.slice(0, 120).map(function (i) {
+            return h('label', { className: 'lw-row', key: i.name, style: { cursor: 'pointer' } },
+              h('input', {
+                type: 'checkbox',
+                checked: false,
+                disabled: busy === i.name,
+                onChange: function () { toggle(i.name, true) },
+              }),
+              h('span', { className: 'lw-mono lw-grow' }, i.name),
+              h('span', { className: 'lw-num' }, '~' + i.approxTokens))
+          })
+        ),
+        h('div', { className: 'lw-sec' },
+          h('div', { className: 'lw-sech' }, '已裁工具 — 取消勾选即放回'),
+          deniedItems.length
+            ? deniedItems.map(function (i) {
+                return h('label', { className: 'lw-row', key: i.name, style: { cursor: 'pointer' } },
+                  h('input', {
+                    type: 'checkbox',
+                    checked: true,
+                    disabled: busy === i.name,
+                    onChange: function () { toggle(i.name, false) },
+                  }),
+                  h('span', { className: 'lw-mono lw-grow' }, i.name),
+                  h('span', { className: 'lw-num' }, '~' + i.approxTokens))
+              })
+            : h('div', { className: 'lw-empty' }, '（无）')
         )
       )
     }
@@ -137,6 +192,22 @@ window.__ModuleLoader__.load({
     function KnowledgeTab(props) {
       var s = props.state
       var k = s.knowledge || {}
+      var busyState = useState(null)
+      var busy = busyState[0], setBusy = busyState[1]
+      var msgState = useState(null)
+      var msg = msgState[0], setMsg = msgState[1]
+      var doCommit = function (id) {
+        setBusy(id)
+        post('/learn-wiki/api/commit', { id: id })
+          .then(function (r) {
+            setBusy(null)
+            setMsg(r.j && r.j.ok
+              ? '已升入 L1：' + id
+              : '被拒绝：' + (((r.j && r.j.blockers) || [(r.j && r.j.error) || r.status]).join('；')))
+            props.onChanged && props.onChanged()
+          })
+          .catch(function (e) { setBusy(null); setMsg('失败：' + String(e.message || e)) })
+      }
       var order = ['suspect', 'suspect-watch', 'confirmed', 'unconfirmed', 'new', 'dead']
       var committed = k.committed || []
       return h('div', null,
@@ -152,12 +223,19 @@ window.__ModuleLoader__.load({
           h('div', { className: 'lw-row' }, h('span', { className: 'lw-grow' },
             'hit >= ' + k.threshold.hit + '　weak >= ' + k.threshold.weak + '　低于 weak 才判 miss'))
         ),
+        msg ? h('div', { className: 'lw-row lw-c-confirmed' }, msg) : null,
         (k.staged || []).length ? h('div', { className: 'lw-sec' },
-          h('div', { className: 'lw-sech' }, '待审暂存（staged，不参与自动召回）'),
+          h('div', { className: 'lw-sech' }, '待审暂存（staged，不参与自动召回）— 无 sources 不许 commit'),
           (k.staged || []).map(function (p) { return h('div', { className: 'lw-row', key: p.id },
             h('span', { className: 'lw-grow' }, p.title || p.id),
             h('span', { className: 'lw-num' }, '来源 ' + p.sources),
-            h('span', { className: 'lw-num' }, 'conf ' + p.confidence)) })
+            h('span', { className: 'lw-num' }, 'conf ' + p.confidence),
+            h('button', {
+              className: 'lw-x', style: { fontSize: '11px', opacity: 0.8 },
+              disabled: busy === p.id,
+              title: p.sources > 0 ? '升入 L1' : '无 sources，会被闸门拒绝',
+              onClick: function () { doCommit(p.id) },
+            }, busy === p.id ? '…' : 'commit')) })
         ) : null,
         h('div', { className: 'lw-sec' },
           h('div', { className: 'lw-sech' }, '已固化知识（按证据分类）'),
@@ -251,8 +329,8 @@ window.__ModuleLoader__.load({
       var body
       if (err) body = h('div', { className: 'lw-err' }, '读取失败：' + err)
       else if (!state) body = h('div', { className: 'lw-empty' }, '读取中…')
-      else if (tab === 'capabilities') body = h(CapabilitiesTab, { state: state })
-      else if (tab === 'knowledge') body = h(KnowledgeTab, { state: state })
+      else if (tab === 'capabilities') body = h(CapabilitiesTab, { state: state, onChanged: load })
+      else if (tab === 'knowledge') body = h(KnowledgeTab, { state: state, onChanged: load })
       else body = h(SupplyTab, { state: state })
 
       return h('div', { className: 'lw-mask', onClick: function (e) { if (e.target === e.currentTarget) props.onClose() } },
