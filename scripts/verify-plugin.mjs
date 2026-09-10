@@ -314,6 +314,35 @@ if (handlers['tools/result']?.[0]) {
   const withSuspect = ids.filter(id => (u.pages[id].suspect ?? 0) > 0)
   check('★ 命中后仍挣扎被记成 suspect（最关键的一类证据）', withSuspect.length > 0,
     JSON.stringify(withSuspect.map(id => id + ':suspect=' + u.pages[id].suspect)))
+
+  // ── ★ weak 桶不算证据 ──
+  // 实测教训：第一次真实触发时，一条走 weak 桶注入的页（我们明确标注了
+  // "弱相关，不要直接采信"）因为后续挣扎被判成"疑似有害" —— 那是错误归因。
+  // 模型被告知别信它，它就不该为后续失败负责。
+  // 这里把阈值抬高，让同一条查询落进 weak 桶，再复现一次挣扎，断言不产生证据。
+  const cfgPath = join(ROOT, 'wiki.config.json')
+  await writeFile(cfgPath, JSON.stringify({
+    acquireCooldownMs: 0, minIntervalMs: 0, maxAcquisitionsPerRun: 5, struggleCooldownMs: 0,
+    hitThreshold: 0.99, weakThreshold: 0.01,   // 什么都进 weak
+  }), 'utf8')
+  // 记下**增量基线** —— 这条页在前面的 hit 桶测试里已经记过一次嫌疑了，
+  // 断言累计值会误判，必须断言"这次没有新增"。
+  const beforeW = (await loadUsage(ROOT)).pages['widget-protocol']?.suspect ?? 0
+  const agW = { id: 'sess-weak', ctx: { tools: { restrict: () => () => {} } } }
+  const wq = { role: 'user', content: [{ type: 'text', text: 'Widget 协议的分帧和魔数是什么' }] }
+  const rw = await preStep({ agent: agW, messages: [wq], step: 1, signal: { throwIfAborted() {} } }, async () => ({ kind: 'enter', messages: [wq] }))
+  const injectedWeak = rw.messages.length === 2
+  for (let i = 0; i < 4; i++) handlers['tools/result'][0]({ name: 'edit', arguments: { file_path: 'D:/x/weak.js' }, agent: agW }, { isError: false })
+  await new Promise(r => setTimeout(r, 600))
+  const u2 = await loadUsage(ROOT)
+  const wp = u2.pages['widget-protocol']
+  check('★ weak 桶确实注入了', injectedWeak, 'len=' + rw.messages.length)
+  const afterW = wp?.suspect ?? 0
+  check('★ weak 桶注入后仍挣扎 -> suspect 不增加（避免错误归因）', afterW === beforeW,
+    'before=' + beforeW + ' after=' + afterW + '  ' + JSON.stringify(wp))
+  check('★ weak 桶仍计入 hits（liveness 两个桶都算）', (wp?.hits ?? 0) > 0, 'hits=' + wp?.hits)
+  // 恢复配置，避免影响后续断言
+  await writeFile(cfgPath, JSON.stringify({ acquireCooldownMs: 0, minIntervalMs: 0, maxAcquisitionsPerRun: 5, struggleCooldownMs: 0 }), 'utf8')
 }
 
 await rm(ROOT, { recursive: true, force: true })

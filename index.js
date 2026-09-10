@@ -366,11 +366,17 @@ export function apply(ctx, pluginConfig = {}) {
       const lastClaimed = decision.messages.findLastIndex(m => m && messages && messages.includes(m))
       const at = lastClaimed >= 0 ? lastClaimed + 1 : decision.messages.length
 
-      // 记录命中，并把这一轮注入了哪些页记下来，供后续判定确认/嫌疑
-      const injectedIds = [...t.hit, ...t.weak].map(h => h.page.id)
-      recordHit(usage, injectedIds)
+      // hits = liveness，两个桶都算（"这条被检索到过吗"）
+      const allInjected = [...t.hit, ...t.weak].map(h => h.page.id)
+      // 但**确认/嫌疑只认 hit 桶**。
+      // 实测教训：weak 桶注入时我们明确写了"弱相关，不要直接采信" ——
+      // 那么模型后来挣扎就不是它的责任。第一次真实触发时，
+      // 一条被标为 weak 的页因为后续挣扎被判成"疑似有害"，
+      // 那是错的归因。只有我们说过"可直接采信"的页，才为后续结果负责。
+      const trustedIds = t.hit.map(h => h.page.id)
+      recordHit(usage, allInjected)
       void saveUsage(cfg.wikiRoot, usage).catch(() => {})
-      if (agent?.id) turnInjections.set(agent.id, { pages: new Set(injectedIds), struggled: false })
+      if (agent?.id) turnInjections.set(agent.id, { pages: new Set(trustedIds), struggled: false })
 
       log('inject bucket=' + t.bucket + ' best=' + t.best + ' hit=' + t.hit.length + ' weak=' + t.weak.length)
       return { kind: 'enter', messages: decision.messages.toSpliced(at, 0, msg) }
