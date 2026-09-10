@@ -19,7 +19,7 @@ import { appendGap, runAcquisition, readGaps } from './lib/acquire.js'
 import { createLlm } from './lib/llm.js'
 import { createLogger } from './lib/log.js'
 import { createStruggleTracker, recordStruggle, symptomQuery, readStruggles } from './lib/struggle.js'
-import { createCapabilityManager } from './lib/capabilities.js'
+import { createCapabilityManager, loadCatalogSnapshot } from './lib/capabilities.js'
 import { loadUsage, saveUsage, recordHit, recordConfirmed, recordSuspect, usageLabel, classify, shouldQuarantine, reinforcementFactor, DEFAULT_POLICY } from './lib/usage.js'
 import { registerTools } from './lib/tools.js'
 
@@ -186,7 +186,7 @@ export function apply(ctx, pluginConfig = {}) {
   }
   const llm = createLlm(ctx, { provider: pluginConfig?.llmProvider, model: pluginConfig?.llmModel })
   const tracker = createStruggleTracker(liveCfg)
-  const caps = createCapabilityManager({ ctx, getCfg: () => liveCfg, log: (...a) => log(...a) })
+  const caps = createCapabilityManager({ ctx, getCfg: () => liveCfg, log: (...a) => log(...a), wikiRoot: baseRoot })
 
   // 每会话的注入去重（KV cache 友好）：内容不变则不再重复注入
   const injectedDigest = new WeakMap()
@@ -287,7 +287,9 @@ export function apply(ctx, pluginConfig = {}) {
               ...(cfg.capabilities?.deny ?? []),
             ],
             catalog: caps.catalogSnapshot?.(
-              [...(cfg.capabilities?.explicitOnly ?? []), ...(cfg.capabilities?.diagnostics ?? []), ...(cfg.capabilities?.deny ?? [])]
+              [...(cfg.capabilities?.explicitOnly ?? []), ...(cfg.capabilities?.diagnostics ?? []), ...(cfg.capabilities?.deny ?? [])],
+              // 内存里没有就回退到磁盘快照 —— 否则重启后 UI 会显示"尚未捕获"
+              await loadCatalogSnapshot(cfg.wikiRoot),
             ) ?? { items: [], total: 0, capturedAt: false },
           },
           knowledge: { committed, staged, counts, threshold: { hit: cfg.hitThreshold, weak: cfg.weakThreshold } },
