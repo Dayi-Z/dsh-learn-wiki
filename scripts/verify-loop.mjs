@@ -108,5 +108,6 @@ const s2 = await runAcquisition({ ctx: fakeCtx, llm: refuseLlm, repoRoot: ROOT, 
 const after = (await loadPages(ROOT)).pages.length
 check('蒸馏器拒绝 → 未产出页', s2.staged === 0 && after === before, JSON.stringify({ staged: s2.staged, skipped: s2.skipped, before, after }))
 
+await rm(ROOT, { recursive: true, force: true })
 console.log(failures === 0 ? '\nALL PASS — 闭环成立' : '\n' + failures + ' FAILURE(S)')
 process.exit(failures === 0 ? 0 : 1)
