@@ -207,6 +207,12 @@ export function apply(ctx, pluginConfig = {}) {
   //   命中后仍挣扎 = 疑似有害知识 —— 这是自动沉淀最致命、也最可测的盲区。
   const turnInjections = new Map()
 
+  // 投递路径的证据追踪。**刻意与 turnInjections 分开**：
+  // 投递发生在挣扎**之后**，若塞进上面那个容器，会因为 "struggled 已为 true"
+  // 而立刻被记成嫌疑 —— 那是错误归因（它压根没赶上那次挣扎）。
+  // 这里要观察的是：**投递之后有没有新的挣扎**。
+  const pendingDeliveries = new Map()   // agentId -> Set<pageId>
+
   // 落盘日志：桌面版里插件 stdout 基本不可见，诊断只能靠文件
   const log = createLogger(baseRoot)
 
@@ -377,6 +383,18 @@ export function apply(ctx, pluginConfig = {}) {
       if (fired.length === 0) return
       log('struggle: ' + fired.map(f => f.type + '×' + f.count).join(', ') + '  (' + (fired[0].detail ?? '') + ')')
 
+      // ★ 投递路径：投递之后**仍然**挣扎 -> 这条补料没帮上忙。
+      // 这是最有价值也最贵的一类证据 —— 补料是花钱搜来的，而且比 L1 召回更主动。
+      const pend = agent.id ? pendingDeliveries.get(agent.id) : null
+      if (pend && pend.size > 0) {
+        pendingDeliveries.delete(agent.id)
+        const ids = [...pend.keys()]
+        void loadUsage(liveCfg.wikiRoot)
+          .then(u => { recordSuspect(u, ids); return saveUsage(liveCfg.wikiRoot, u) })
+          .then(() => log('usage: 投递后仍挣扎，记嫌疑 ' + ids.join(',')))
+          .catch((e) => log('usage suspect(deliver) failed (non-fatal):', e?.message ?? e))
+      }
+
       // ★ 最有价值的一类证据：这一轮的注入**没能阻止**挣扎。
       // 那条知识要么没用，要么有害。降权它（不是删除 —— 降权可逆）。
       const inj = agent.id ? turnInjections.get(agent.id) : null
@@ -534,7 +552,20 @@ export function apply(ctx, pluginConfig = {}) {
       const summary = await runAcquisition({
         ctx, llm, repoRoot: cfg.wikiRoot, cfg, log,
         // 投递：把刚蒸馏出来的页面推进**正在进行的那一轮**
-        onStaged: target ? (page) => deliverToCurrentTurn(target, page, log) : null,
+        onStaged: target ? async (page) => {
+          const ok = await deliverToCurrentTurn(target, page, log)
+          if (!ok || !target.id) return
+          // 投递本身也是一次"曝光" —— 它确实进了模型上下文
+          // 存 { id -> 投递时刻 }，用于判断"有没有给模型留出使用它的时间"
+          const map = pendingDeliveries.get(target.id) ?? new Map()
+          map.set(page.id, Date.now())
+          pendingDeliveries.set(target.id, map)
+          try {
+            const u = await loadUsage(liveCfg.wikiRoot)
+            recordHit(u, [page.id])
+            await saveUsage(liveCfg.wikiRoot, u)
+          } catch (e) { log('usage hit(deliver) failed (non-fatal):', e?.message ?? e) }
+        } : null,
       })
       consumed = summary.considered > 0
       if (summary.considered > 0) log('background acquisition (' + why + '):', JSON.stringify({ considered: summary.considered, staged: summary.staged, skipped: summary.skipped, errors: summary.errors }))
@@ -573,6 +604,27 @@ export function apply(ctx, pluginConfig = {}) {
             .then(u => { recordConfirmed(u, toConfirm); return saveUsage(liveCfg.wikiRoot, u) })
             .then(() => log('usage: 记为确认 ' + toConfirm.join(',')))
             .catch((e) => log('usage confirm failed (non-fatal):', e?.message ?? e))
+        }
+      }
+      // 投递过的页：这一轮结束时没被记嫌疑 -> 弱确认（它至少没让情况更糟）
+      if (pendingDeliveries.size > 0) {
+        const nowMs = Date.now()
+        const dwell = liveCfg.deliveryConfirmMinDwellMs ?? 10000
+        const okIds = []
+        const tooEarly = []
+        for (const [, map] of pendingDeliveries.entries()) {
+          for (const [id, at] of map.entries()) {
+            // 只给"投递后确实又工作了一段时间"的记确认；刚投递就结束轮次的，什么都不记
+            if (nowMs - at >= dwell) okIds.push(id); else tooEarly.push(id)
+          }
+        }
+        pendingDeliveries.clear()
+        if (tooEarly.length > 0) log('usage: 投递后观察期不足，不作判定 ' + tooEarly.join(','))
+        if (okIds.length > 0) {
+          void loadUsage(liveCfg.wikiRoot)
+            .then(u => { recordConfirmed(u, okIds); return saveUsage(liveCfg.wikiRoot, u) })
+            .then(() => log('usage: 投递后无新挣扎，记确认 ' + okIds.join(',')))
+            .catch((e) => log('usage confirm(deliver) failed (non-fatal):', e?.message ?? e))
         }
       }
       scheduleAcquire()

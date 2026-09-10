@@ -21,6 +21,8 @@ await writeFile(join(ROOT, 'wiki.config.json'), JSON.stringify({
   minIntervalMs: 0,
   maxAcquisitionsPerRun: 5,
   struggleCooldownMs: 0,
+  // 测试里把观察期压到 1.2s，既能让场景 B 通过，也还能测出场景 C 的"太早"
+  deliveryConfirmMinDwellMs: 1200,
 }), 'utf8')
 
 // 放一页已固化知识，用于验证 hit 路径
@@ -305,6 +307,74 @@ if (handlers['tools/result']?.[0]) {
   handlers['tools/result'][0]({ name: 'edit', arguments: { file_path: 'D:/x/widget.js' }, agent: agS }, { isError: false })
   handlers['tools/result'][0]({ name: 'edit', arguments: { file_path: 'D:/x/widget.js' }, agent: agS }, { isError: false })
   await new Promise(r => setTimeout(r, 600))
+}
+
+// ROOT 在本文件是常量，这里只是给它一个好读的别名
+const ROOT_REF = () => ROOT
+const { loadUsage: loadUsageHere } = await import('../lib/usage.js')
+const loadUsage = loadUsageHere
+
+// ── ★ 投递路径的证据追踪 ──
+// 投递发生在挣扎**之后**，所以要观察"投递之后有没有新的挣扎"。
+// 这一段专门验证这条时序，因为它最容易被写成错误归因。
+if (handlers['tools/result']?.[0] && handlers['session/event']?.[0]) {
+  const obs = handlers['tools/result'][0]
+
+  // 场景 A：投递后**仍然**挣扎 -> 那条补料没帮上忙
+  const agA = { id: 'sess-deliver-a', inject: () => 'id', ctx: { tools: { restrict: () => () => {} } } }
+  const mq = { role: 'user', content: [{ type: 'text', text: 'Alpha 改动不生效' }] }
+  await preStep({ agent: agA, messages: [mq], step: 1, signal: { throwIfAborted() {} } }, async () => ({ kind: 'enter', messages: [mq] }))
+  for (let i = 0; i < 4; i++) obs({ name: 'edit', arguments: { file_path: 'D:/x/alpha.js' }, agent: agA }, { isError: false })
+  // 等补料 + 投递完成
+  await new Promise(r => setTimeout(r, 2500))
+  const ua1 = await loadUsage(ROOT_REF())
+  check('★ 投递被记成 hits', (ua1.pages['widget-churn-fix']?.hits ?? 0) > 0, JSON.stringify(ua1.pages['widget-churn-fix']))
+  // 投递之后再挣扎一次
+  for (let i = 0; i < 4; i++) obs({ name: 'edit', arguments: { file_path: 'D:/x/beta.js' }, agent: agA }, { isError: false })
+  await new Promise(r => setTimeout(r, 800))
+  const ua2 = await loadUsage(ROOT_REF())
+  check('★ 投递后仍挣扎 -> 记嫌疑（这条补料没帮上忙）',
+    (ua2.pages['widget-churn-fix']?.suspect ?? 0) > 0, JSON.stringify(ua2.pages['widget-churn-fix']))
+
+  // 场景 B：投递后没再挣扎，轮次结束 -> 弱确认
+  const agB = { id: 'sess-deliver-b', inject: () => 'id', ctx: { tools: { restrict: () => () => {} } } }
+  const mq2 = { role: 'user', content: [{ type: 'text', text: 'Gamma 改动不生效' }] }
+  await preStep({ agent: agB, messages: [mq2], step: 1, signal: { throwIfAborted() {} } }, async () => ({ kind: 'enter', messages: [mq2] }))
+  for (let i = 0; i < 4; i++) obs({ name: 'edit', arguments: { file_path: 'D:/x/gamma.js' }, agent: agB }, { isError: false })
+  await new Promise(r => setTimeout(r, 2500))
+  const ub1 = await loadUsage(ROOT_REF())
+  const beforeB = ub1.pages['widget-churn-fix']?.confirmed ?? 0
+  handlers['session/event'][0]({ id: 'sess' }, { type: 'turn/end' })
+  await new Promise(r => setTimeout(r, 500))
+  const ub2 = await loadUsage(ROOT_REF())
+  check('★ 投递后无新挣扎 -> 轮次结束记确认',
+    (ub2.pages['widget-churn-fix']?.confirmed ?? 0) > beforeB,
+    'before=' + beforeB + ' after=' + (ub2.pages['widget-churn-fix']?.confirmed ?? 0))
+
+  // 场景 C：投递后**立刻**结束轮次 -> 什么都不记
+  // 模型根本没机会用它，此时记确认是假阳性，会抬高一条从未被检验过的知识。
+  const agC = { id: 'sess-deliver-c', inject: () => 'id', ctx: { tools: { restrict: () => () => {} } } }
+  const mq3 = { role: 'user', content: [{ type: 'text', text: 'Delta 改动不生效' }] }
+  await preStep({ agent: agC, messages: [mq3], step: 1, signal: { throwIfAborted() {} } }, async () => ({ kind: 'enter', messages: [mq3] }))
+  for (let i = 0; i < 4; i++) obs({ name: 'edit', arguments: { file_path: 'D:/x/delta.js' }, agent: agC }, { isError: false })
+  await new Promise(r => setTimeout(r, 2500))   // 等投递完成
+  // 关键：把观察期调大，让"刚投递就结束轮次"成为确定性的场景。
+  // 否则等补料的那 2.5 秒本身就可能超过观察期，测试前提不成立（实测踩到）。
+  await writeFile(join(ROOT, 'wiki.config.json'), JSON.stringify({
+    acquireCooldownMs: 0, minIntervalMs: 0, maxAcquisitionsPerRun: 5, struggleCooldownMs: 0,
+    deliveryConfirmMinDwellMs: 600000,
+  }), 'utf8')
+  // liveCfg 只在 pre-step / 补料时刷新，所以要触发一次读取才能让新配置生效
+  const rq = { role: 'user', content: [{ type: 'text', text: 'Delta 再看一次' }] }
+  await preStep({ agent: agC, messages: [rq], step: 1, signal: { throwIfAborted() {} } }, async () => ({ kind: 'enter', messages: [rq] }))
+  const uc1 = await loadUsage(ROOT_REF())
+  const beforeC = uc1.pages['widget-churn-fix']?.confirmed ?? 0
+  handlers['session/event'][0]({ id: 'sess' }, { type: 'turn/end' })   // 观察期远未满足
+  await new Promise(r => setTimeout(r, 500))
+  const uc2 = await loadUsage(ROOT_REF())
+  check('★ 投递后观察期不足 -> 不记确认（宁可少记，不要记错）',
+    (uc2.pages['widget-churn-fix']?.confirmed ?? 0) === beforeC,
+    'before=' + beforeC + ' after=' + (uc2.pages['widget-churn-fix']?.confirmed ?? 0))
 }
 
 // ── ★ 证据链：注入记 hits；命中后仍挣扎记 suspect ──
