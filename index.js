@@ -229,12 +229,14 @@ export function apply(ctx, pluginConfig = {}) {
       }
     }
 
-    if (step === 1) {
-      tracker.reset(agent)
-      // 补装能力包：恢复会话时 agent 在启动早期创建，那一刻工具目录还不全
-      // （实测只有 46 个）。pre-step 在提示词组装之前，所以这里补装仍能生效。
-      try { caps.ensure(agent) } catch (e) { log('capabilities ensure failed (non-fatal):', e?.message ?? e) }
-    }
+    // 能力包在**每一步** ensure（幂等：装好后立即返回）。
+    //
+    // 为什么不能只在 step===1：find_tools 登记放宽后，需要**下一步**就重算完，
+    // 否则同一轮内后续的 step 仍然看不到被找回的工具 —— 实测就是这样，
+    // 放宽登记了却始终不生效。pre-step 在提示词组装之前，所以这里重算能赶上本步请求。
+    try { caps.ensure(agent) } catch (e) { log('capabilities ensure failed (non-fatal):', e?.message ?? e) }
+
+    if (step === 1) tracker.reset(agent)
     if (step !== 1) return decision                                  // 每轮第一步 = "工作前"
     if (decision.kind === 'reject') return decision
     if (!decision.messages || decision.messages.length === 0) return decision
