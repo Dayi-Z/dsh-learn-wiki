@@ -19,6 +19,7 @@ import { appendGap, runAcquisition } from './lib/acquire.js'
 import { createLlm } from './lib/llm.js'
 import { createLogger } from './lib/log.js'
 import { createStruggleTracker, recordStruggle } from './lib/struggle.js'
+import { createCapabilityManager } from './lib/capabilities.js'
 import { registerTools } from './lib/tools.js'
 
 export const name = 'dsh-learn-wiki'
@@ -89,6 +90,7 @@ export function apply(ctx, pluginConfig = {}) {
   }
   const llm = createLlm(ctx, { provider: pluginConfig?.llmProvider, model: pluginConfig?.llmModel })
   const tracker = createStruggleTracker(liveCfg)
+  const caps = createCapabilityManager({ ctx, getCfg: () => liveCfg, log: (...a) => log(...a) })
 
   // 每会话的注入去重（KV cache 友好）：内容不变则不再重复注入
   const injectedDigest = new WeakMap()
@@ -102,7 +104,7 @@ export function apply(ctx, pluginConfig = {}) {
   // ── 工具注册 ──
   ctx.effect(() => {
     // 传 getCfg 而不是快照：每次工具调用都重读配置，wiki.config.json 热生效
-    const dispose = registerTools(ctx, { getCfg, llm })
+    const dispose = registerTools(ctx, { getCfg, llm, caps })
     return () => { try { dispose() } catch { /* noop */ } }
   }, 'dsh-learn-wiki: tools')
 
@@ -119,6 +121,13 @@ export function apply(ctx, pluginConfig = {}) {
         + 'use wiki_commit to promote a staged page into the knowledge base after verifying it. '
         + 'Never commit a page without sources.',
     })
+  })
+
+  // ── 能力包装配 ──
+  // agent/created 在作用域 setup 之后、驱动器启动之前触发，
+  // 所以掩码能赶上第一次提示词组装。每个 agent 只装一次。
+  ctx.on('agent/created', ({ agent }) => {
+    try { caps.applyTo(agent) } catch (e) { log('capabilities hook failed (non-fatal):', e?.message ?? e) }
   })
 
   // ── 挣扎检测：真正的触发器 ──

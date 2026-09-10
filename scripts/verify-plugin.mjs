@@ -38,7 +38,15 @@ const registered = []
 const handlers = {}
 const sections = []
 const mockCtx = {
-  tools: { register: (def) => { registered.push(def); return () => {} } },
+  tools: {
+    register: (def) => { registered.push(def); return () => {} },
+    // 能力包要读完整目录；补齐这个 mock，否则 find_tools 走的是空目录的降级路径
+    schemas: () => ([
+      { name: 'read', description: 'Read a file' },
+      { name: 'workflow', description: 'Run a JavaScript workflow script that orchestrates subagents at scale' },
+      { name: 'ralph', description: 'Run a foreground fresh-agent Ralph loop' },
+    ]),
+  },
   llm: {
     listProviders: () => [{ id: 'mock' }],
     listModels: async () => [{ id: 'mock-model' }],
@@ -68,8 +76,8 @@ catch (e) { check('apply(ctx) 执行成功', false, e.message) }
 
 // ── 工具 ──
 const names = registered.map(t => t.name).sort()
-check('注册了 6 个工具', registered.length === 6, names.join(', '))
-check('工具名符合预期', JSON.stringify(names) === JSON.stringify(['wiki_acquire', 'wiki_commit', 'wiki_learn', 'wiki_recall', 'wiki_review', 'wiki_struggle']), names.join(', '))
+check('注册了 7 个工具', registered.length === 7, names.join(', '))
+check('工具名符合预期', JSON.stringify(names) === JSON.stringify(['find_tools', 'wiki_acquire', 'wiki_commit', 'wiki_learn', 'wiki_recall', 'wiki_review', 'wiki_struggle']), names.join(', '))
 check('每个工具都有 output 声明', registered.every(t => t.output && t.output.schema && typeof t.output.render === 'function'))
 check('每个工具都有 execute', registered.every(t => typeof t.execute === 'function'))
 
@@ -77,6 +85,16 @@ check('每个工具都有 execute', registered.every(t => typeof t.execute === '
 check('挂上 agent/pre-step', Array.isArray(handlers['agent/pre-step']) && handlers['agent/pre-step'].length === 1)
 check('订阅 session/event（轮次边界的正确来源）', Array.isArray(handlers['session/event']) && handlers['session/event'].length === 1)
 check('订阅 tools/result（挣扎检测）', Array.isArray(handlers['tools/result']) && handlers['tools/result'].length === 1)
+check('订阅 agent/created（能力包装配）', Array.isArray(handlers['agent/created']) && handlers['agent/created'].length === 1)
+
+// 能力包必须真的能对 agent 装配掩码
+if (handlers['agent/created']?.[0]) {
+  const restrictCalls = []
+  const agent = { ctx: { tools: { restrict: (f) => { restrictCalls.push(f); return () => {} } } } }
+  try { handlers['agent/created'][0]({ agent }) } catch (e) { check('agent/created 钩子不抛', false, e.message) }
+  check('能力包对 agent 装配了 deny 掩码', restrictCalls.length === 1, JSON.stringify(restrictCalls))
+  check('默认裁掉 workflow 与 ralph', JSON.stringify(restrictCalls[0]?.deny?.sort()) === JSON.stringify(['ralph', 'workflow']), JSON.stringify(restrictCalls[0]))
+}
 
 // 挣扎检测必须真的能从工具流里认出一堵墙
 if (handlers['tools/result']?.[0]) {
@@ -173,6 +191,8 @@ for (const r of [
   await callTool('wiki_acquire', { limit: 1 }),
   await callTool('wiki_struggle', { limit: 5 }),
   await callTool('wiki_struggle', { type: 'repeat-failure' }),
+  await callTool('find_tools', { query: 'workflow' }),
+  await callTool('find_tools', { query: 'zzz-nothing' }),
 ]) {
   check('输出合法: ' + r.label, r.ok, r.detail)
 }
