@@ -49,7 +49,7 @@ const mockCtx = {
   // 于是 ctx.on('turn/end', ...) 这种永不触发的订阅也能"通过"测试——
   // 结果整个补料路径在生产里是死的。mock 必须能证伪。
   on: (ev, h) => {
-    const KNOWN = ['agent/pre-step', 'session/event', 'agent/created', 'agent/disposed', 'tools/result']
+    const KNOWN = ['agent/pre-step', 'session/event', 'agent/created', 'agent/disposed', 'tools/result', 'tools/post-execute']
     if (!KNOWN.includes(ev)) throw new Error('mock: 未知 live 事件名 "' + ev + '"（订阅它永远收不到通知）')
     ;(handlers[ev] ||= []).push(h)
     return () => {}
@@ -68,14 +68,28 @@ catch (e) { check('apply(ctx) 执行成功', false, e.message) }
 
 // ── 工具 ──
 const names = registered.map(t => t.name).sort()
-check('注册了 5 个工具', registered.length === 5, names.join(', '))
-check('工具名符合预期', JSON.stringify(names) === JSON.stringify(['wiki_acquire', 'wiki_commit', 'wiki_learn', 'wiki_recall', 'wiki_review']), names.join(', '))
+check('注册了 6 个工具', registered.length === 6, names.join(', '))
+check('工具名符合预期', JSON.stringify(names) === JSON.stringify(['wiki_acquire', 'wiki_commit', 'wiki_learn', 'wiki_recall', 'wiki_review', 'wiki_struggle']), names.join(', '))
 check('每个工具都有 output 声明', registered.every(t => t.output && t.output.schema && typeof t.output.render === 'function'))
 check('每个工具都有 execute', registered.every(t => typeof t.execute === 'function'))
 
 // ── 钩子 ──
 check('挂上 agent/pre-step', Array.isArray(handlers['agent/pre-step']) && handlers['agent/pre-step'].length === 1)
 check('订阅 session/event（轮次边界的正确来源）', Array.isArray(handlers['session/event']) && handlers['session/event'].length === 1)
+check('订阅 tools/result（挣扎检测）', Array.isArray(handlers['tools/result']) && handlers['tools/result'].length === 1)
+
+// 挣扎检测必须真的能从工具流里认出一堵墙
+if (handlers['tools/result']?.[0]) {
+  const obs = handlers['tools/result'][0]
+  const ag = {}
+  const toolExec = { name: 'read', arguments: { file_path: 'x' }, agent: ag }
+  for (let i = 0; i < 5; i++) obs(toolExec, { isError: false })
+  const { readStruggles } = await import('../lib/struggle.js')
+  const recs = await readStruggles(ROOT)
+  check('连续相同调用被记录进 struggle.jsonl', recs.length >= 1, 'records=' + recs.length)
+  check('记录里含 repeat-identical', recs.some(r => (r.signals ?? []).some(s => s.type === 'repeat-identical')),
+    JSON.stringify(recs.slice(-1).map(r => (r.signals ?? []).map(s => s.type))))
+}
 check('未订阅不存在的 turn/end live 事件', handlers['turn/end'] === undefined)
 
 // 事件处理器必须能安全处理非 turn/end 事件（过滤正确、不抛异常）
@@ -157,6 +171,8 @@ for (const r of [
   // 必须测非 dryRun 路径：details 的 page 字段只在 staged 时存在，
   // 之前只测 dryRun，让它带着 undefined 溜了过去。
   await callTool('wiki_acquire', { limit: 1 }),
+  await callTool('wiki_struggle', { limit: 5 }),
+  await callTool('wiki_struggle', { type: 'repeat-failure' }),
 ]) {
   check('输出合法: ' + r.label, r.ok, r.detail)
 }

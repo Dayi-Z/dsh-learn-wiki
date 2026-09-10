@@ -18,6 +18,7 @@ import { buildCorpus, scoreQuery, triage, recallable, looksLikeGap } from './lib
 import { appendGap, runAcquisition } from './lib/acquire.js'
 import { createLlm } from './lib/llm.js'
 import { createLogger } from './lib/log.js'
+import { createStruggleTracker, recordStruggle } from './lib/struggle.js'
 import { registerTools } from './lib/tools.js'
 
 export const name = 'dsh-learn-wiki'
@@ -77,8 +78,17 @@ function renderInjection(t, cfg) {
 
 export function apply(ctx, pluginConfig = {}) {
   const baseRoot = pluginConfig?.wikiRoot || DEFAULTS.wikiRoot
-  const getCfg = () => loadConfig(baseRoot, pluginConfig)
+  // 挣扎检测器跑在 tools/result 的同步回调里，那里没法 await 配置。
+  // 所以维护一份"活的"配置快照：getCfg 每次解析后原地更新它，
+  // 检测器始终读到最新阈值（阈值调了不用重启）。
+  const liveCfg = { ...DEFAULTS, wikiRoot: baseRoot }
+  const getCfg = async () => {
+    const c = await loadConfig(baseRoot, pluginConfig)
+    Object.assign(liveCfg, c)
+    return c
+  }
   const llm = createLlm(ctx, { provider: pluginConfig?.llmProvider, model: pluginConfig?.llmModel })
+  const tracker = createStruggleTracker(liveCfg)
 
   // 每会话的注入去重（KV cache 友好）：内容不变则不再重复注入
   const injectedDigest = new WeakMap()
@@ -111,12 +121,44 @@ export function apply(ctx, pluginConfig = {}) {
     })
   })
 
+  // ── 挣扎检测：真正的触发器 ──
+  // 为什么不是"检索未命中"：那个信号太廉价，任何新话题都会未命中，
+  // 于是为每件新鲜事都去联网。真正值钱的是"卡住了"——稀有、昂贵、
+  // 且必须当场兑现。
+  //
+  // 这里刻意只做**观测**（observe 模式）：先记录它什么时候报警、报得准不准，
+  // 观察够了再开自动联网。理由很简单——这一轮开发里我已经数次用想象
+  // 替代证据，不能再犯。
+  ctx.on('tools/result', (exec, result) => {
+    try {
+      const agent = exec?.agent
+      if (!agent) return                       // 无 agent 的调用没有需要提醒的模型
+      const fired = tracker.observe(agent, exec, result)
+      if (fired.length === 0) return
+      log('struggle: ' + fired.map(f => f.type + '×' + f.count).join(', ') + '  (' + (fired[0].detail ?? '') + ')')
+      void recordStruggle(liveCfg.wikiRoot, {
+        ts: new Date().toISOString(),
+        sessionId: agent.id ?? '',   // 必须是字符串：undefined 会让工具输出非 lossless JSON
+        mode: liveCfg.struggleMode,
+        signals: fired,
+      })
+      if (liveCfg.struggleMode === 'active') {
+        // Phase 2：命中后走 L1 → L2 → L3，并用 agent.inject() 把结果
+        // 推进**当前这一轮**（不是下一轮），才能真正打断循环。
+      }
+    } catch (e) {
+      log('struggle observer failed (non-fatal):', e?.message ?? e)
+    }
+  })
+
   // ── 旋钮 A：工作前自动注入（命中则注入；未命中则记 gap）──
   ctx.on('agent/pre-step', async ({ agent, messages, step, signal }, next) => {
     const decision = await next()
     let cfg
     try { cfg = await getCfg() } catch { return decision }
     if (!cfg.enabled) return decision
+    // 用户新提示词到达 = 新任务，上一轮的挣扎不该污染这一次的判定
+    if (step === 1) tracker.reset(agent)
     if (step !== 1) return decision                                  // 每轮第一步 = "工作前"
     if (decision.kind === 'reject') return decision
     if (!decision.messages || decision.messages.length === 0) return decision
