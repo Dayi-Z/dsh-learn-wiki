@@ -119,6 +119,22 @@ if (handlers['tools/result']?.[0]) {
   check('连续相同调用被记录进 struggle.jsonl', recs.length >= 1, 'records=' + recs.length)
   check('记录里含 repeat-identical', recs.some(r => (r.signals ?? []).some(s => s.type === 'repeat-identical')),
     JSON.stringify(recs.slice(-1).map(r => (r.signals ?? []).map(s => s.type))))
+
+  // ★ 触发器换向：挣扎信号必须**自动登记一条症状 gap**
+  // 这是整个改造的核心 —— 从"检索未命中"换成"卡住了"。
+  const { readGaps } = await import('../lib/acquire.js')
+  const baseGaps = (await readGaps(ROOT)).length
+  const ag2 = {}
+  // 制造一个 edit-churn：同一文件改 4 次
+  for (let i = 0; i < 4; i++) obs({ name: 'edit', arguments: { file_path: 'D:/x/widget.js' }, agent: ag2 }, { isError: false })
+  // appendGap 是 fire-and-forget（不能阻塞工具结果回调），所以这里要等一下
+  await new Promise(r => setTimeout(r, 300))
+  const afterGaps = await readGaps(ROOT)
+  check('★ 挣扎自动登记了 gap', afterGaps.length > baseGaps, 'before=' + baseGaps + ' after=' + afterGaps.length)
+  const widgetGap = afterGaps.find(g => String(g.query).includes('widget.js'))
+  check('★ 登记的是症状查询而非用户原话',
+    !!widgetGap && /反复修改/.test(String(widgetGap.query)) && !/ok|好的|继续/.test(String(widgetGap.query)),
+    JSON.stringify(String(widgetGap?.query ?? '')))
 }
 check('未订阅不存在的 turn/end live 事件', handlers['turn/end'] === undefined)
 
@@ -170,7 +186,10 @@ const res3 = await preStep({ agent: {}, messages: [missMsg], step: 1, signal: { 
 check('未命中时不注入', res3.messages.length === 1)
 const { readGaps } = await import('../lib/acquire.js')
 const gaps = await readGaps(ROOT)
-check('未命中时记入 gap 队列', gaps.length === 1, JSON.stringify(gaps.map(g => ({ q: g.query.slice(0, 30), s: g.status }))))
+// ★ 触发器已换成 'struggle'：检索未命中**不再**记 gap。
+// 实测 19 条 miss-gap 全是用户对话原话，零真缺口 —— 噪声率 100%。
+check('★ 未命中不再记 gap（触发器已换成 struggle）',
+  !gaps.some(g => String(g.query).includes('kubernetes')), JSON.stringify(gaps.map(g => String(g.query).slice(0, 34))))
 
 // ── 工具输出必须是 lossless JSON ──
 // 这是真踩过的坑：wiki_recall 在非 miss 分支返回了 `note: undefined`，
@@ -215,6 +234,7 @@ for (const r of [
   await callTool('wiki_struggle', { type: 'repeat-failure' }),
   await callTool('find_tools', { query: 'workflow' }),
   await callTool('find_tools', { query: 'zzz-nothing' }),
+  await callTool('wiki_learn', { title: '临时', body: 'x', sources: 'https://e.com' }),
 ]) {
   check('输出合法: ' + r.label, r.ok, r.detail)
 }

@@ -18,7 +18,7 @@ import { buildCorpus, scoreQuery, triage, recallable, looksLikeGap } from './lib
 import { appendGap, runAcquisition } from './lib/acquire.js'
 import { createLlm } from './lib/llm.js'
 import { createLogger } from './lib/log.js'
-import { createStruggleTracker, recordStruggle } from './lib/struggle.js'
+import { createStruggleTracker, recordStruggle, symptomQuery } from './lib/struggle.js'
 import { createCapabilityManager } from './lib/capabilities.js'
 import { registerTools } from './lib/tools.js'
 
@@ -146,6 +146,8 @@ export function apply(ctx, pluginConfig = {}) {
 
   // 每会话的注入去重（KV cache 友好）：内容不变则不再重复注入
   const injectedDigest = new WeakMap()
+  // agent -> 最近一次用户查询。挣扎时用它给症状查询补一点任务上下文。
+  const lastQuery = new WeakMap()
   // 后台补料互斥 + 冷却
   let acquiring = false
   let lastAcquire = 0
@@ -203,9 +205,18 @@ export function apply(ctx, pluginConfig = {}) {
         mode: liveCfg.struggleMode,
         signals: fired,
       })
-      if (liveCfg.struggleMode === 'active') {
-        // Phase 2：命中后走 L1 → L2 → L3，并用 agent.inject() 把结果
-        // 推进**当前这一轮**（不是下一轮），才能真正打断循环。
+      if (liveCfg.struggleMode === 'active'
+          && (liveCfg.gapTrigger === 'struggle' || liveCfg.gapTrigger === 'both')) {
+        // 把挣扎翻译成**症状查询**再登记 —— 不是用户的原话。
+        // 原话是意图（"ok 按你的倾向来"），搜索引擎只能给出噪声；
+        // 症状（报错文本、改不动的文件、反复失败的工具）才是网上真有人写过的。
+        const q = symptomQuery(fired, lastQuery.get(agent) ?? '')
+        if (q && q.length >= 6) {
+          log('struggle -> gap: ' + q.slice(0, 90))
+          void appendGap(liveCfg.wikiRoot, { query: q, score: 0, sessionId: agent.id ?? '' })
+            .then(() => scheduleAcquire())   // 立刻推一次，不等轮次结束
+            .catch((e) => log('struggle gap failed (non-fatal):', e?.message ?? e))
+        }
       }
     } catch (e) {
       log('struggle observer failed (non-fatal):', e?.message ?? e)
@@ -247,6 +258,7 @@ export function apply(ctx, pluginConfig = {}) {
 
     const query = queryFrom(messages)
     if (!query || query.length < 4) return decision
+    lastQuery.set(agent, query.slice(0, 200))
 
     try {
       if (!(await repoExistsSafe(cfg.wikiRoot))) await ensureRepo(cfg.wikiRoot)
@@ -261,7 +273,10 @@ export function apply(ctx, pluginConfig = {}) {
       if (t.bucket === 'miss') {
         // 旋钮 B2：只入队，绝不在此处阻塞去联网。
         // 但寒暄类短输入不是知识缺口，记进去只会污染队列并触发无意义联网。
-        if (cfg.autoAcquire && looksLikeGap(query, { minChars: cfg.minGapQueryChars })) {
+        // 触发器开关：默认只认"卡住了"，不再因为"检索未命中"就补料。
+        // 实测 19 条 gap 全是对话原话，零真缺口 —— 那个信号的噪声率是 100%。
+        const missTriggerOn = cfg.gapTrigger === 'miss' || cfg.gapTrigger === 'both'
+        if (missTriggerOn && cfg.autoAcquire && looksLikeGap(query, { minChars: cfg.minGapQueryChars })) {
           await appendGap(cfg.wikiRoot, { query, score: t.best, sessionId: agent?.id })
           log('gap recorded, bucket=miss score=' + t.best)
         }
