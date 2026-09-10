@@ -98,17 +98,27 @@ mod.apply(ctxLike, { wikiRoot: T })
 function postCall(pathname, body) {
   return new Promise((resolve) => {
     let code = 0
-    const handlers = {}
     const req = {
       url: pathname, method: 'POST',
-      on: (ev, cb) => { handlers[ev] = cb; return req },
       destroy: () => {},
+      // 关键：在**监听器注册时**才投递 body，而不是固定 setTimeout。
+      // handler 的第一个 await 是 getCfg()，等它走到 readBody() 时定时器可能已经发完了，
+      // 事件就丢了 —— 实测踩到。真实 node http 流会缓冲，所以这只是 mock 不够真。
+      on: (ev, cb) => {
+        if (ev === 'end') {
+          setTimeout(() => {
+            req._data && req._data(JSON.stringify(body))
+            cb()
+          }, 0)
+        }
+        if (ev === 'data') req._data = cb
+        return req
+      },
     }
     const res = { writeHead: (c) => { code = c }, end: (b) => resolve({ code, body: b }) }
     // 超时保护：否则一旦 handler 没调 end，测试会静默挂死（比失败更难查）
-    setTimeout(() => resolve({ code: -1, body: '(超时：handler 未响应)' }), 2000)
+    setTimeout(() => resolve({ code: -1, body: '(超时：handler 未响应)' }), 3000)
     route.handler(req, res)
-    setTimeout(() => { handlers.data && handlers.data(JSON.stringify(body)); handlers.end && handlers.end() }, 0)
   })
 }
 
