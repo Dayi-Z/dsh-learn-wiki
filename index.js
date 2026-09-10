@@ -119,6 +119,10 @@ export function apply(ctx, pluginConfig = {}) {
     if (decision.kind === 'reject') return decision
     if (!decision.messages || decision.messages.length === 0) return decision
 
+    // 兜底触发：即使 session/event 那条路因宿主版本差异失效，
+    // 补料仍会在下一轮开始时被推动。acquiring 锁 + 冷却保证不会重复烧钱。
+    scheduleAcquire()
+
     const query = queryFrom(messages)
     if (!query || query.length < 4) return decision
 
@@ -179,7 +183,15 @@ export function apply(ctx, pluginConfig = {}) {
       acquiring = false
     }
   }
-  try { ctx.on('turn/end', scheduleAcquire) } catch (e) { log('turn/end hook unavailable:', e?.message ?? e) }
+  // 轮次边界是「持久 session/event」，不是可 ctx.on 的 live 事件。
+  // 早先写成 ctx.on('turn/end', ...) 不会报错、也永远不触发 ——
+  // 整个 L3 补料路径因此是死的（gap 永远停在 pending）。
+  // 正确签名是 (session, event)，事件类型在 event.type 上。
+  try {
+    ctx.on('session/event', (session, event) => {
+      if (event && event.type === 'turn/end') scheduleAcquire()
+    })
+  } catch (e) { log('session/event hook unavailable:', e?.message ?? e) }
 }
 
 async function repoExistsSafe(root) {

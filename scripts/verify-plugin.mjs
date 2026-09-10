@@ -45,7 +45,15 @@ const mockCtx = {
     stream: async function* () {},
   },
   web: { search: async () => ({ content: 'c', sources: [{ url: 'https://e.com', title: 't', snippet: 's' }] }) },
-  on: (ev, h) => { (handlers[ev] ||= []).push(h); return () => {} },
+  // 只接受真实存在的 live 事件名。此前的 mock 对任何名字都照单全收，
+  // 于是 ctx.on('turn/end', ...) 这种永不触发的订阅也能"通过"测试——
+  // 结果整个补料路径在生产里是死的。mock 必须能证伪。
+  on: (ev, h) => {
+    const KNOWN = ['agent/pre-step', 'session/event', 'agent/created', 'agent/disposed', 'tools/result']
+    if (!KNOWN.includes(ev)) throw new Error('mock: 未知 live 事件名 "' + ev + '"（订阅它永远收不到通知）')
+    ;(handlers[ev] ||= []).push(h)
+    return () => {}
+  },
   effect: (fn) => fn(),
   inject: (services, cb) => { cb({ systemPrompt: { section: (s) => { sections.push(s); return () => {} } } }) },
 }
@@ -67,7 +75,17 @@ check('每个工具都有 execute', registered.every(t => typeof t.execute === '
 
 // ── 钩子 ──
 check('挂上 agent/pre-step', Array.isArray(handlers['agent/pre-step']) && handlers['agent/pre-step'].length === 1)
-check('挂上 turn/end', Array.isArray(handlers['turn/end']) && handlers['turn/end'].length === 1)
+check('订阅 session/event（轮次边界的正确来源）', Array.isArray(handlers['session/event']) && handlers['session/event'].length === 1)
+check('未订阅不存在的 turn/end live 事件', handlers['turn/end'] === undefined)
+
+// 事件处理器必须能安全处理非 turn/end 事件（过滤正确、不抛异常）
+try {
+  handlers['session/event'][0]({ id: 'sess' }, { type: 'turn/start' })
+  handlers['session/event'][0]({ id: 'sess' }, undefined)
+  check('session/event 处理器过滤非 turn/end 且不抛', true)
+} catch (e) {
+  check('session/event 处理器过滤非 turn/end 且不抛', false, e.message)
+}
 
 // ── 系统提示词段 ──
 check('贡献了 systemPrompt 段', sections.length === 1 && sections[0].name === 'app:dsh-learn-wiki', sections.map(s => s.name).join(','))
