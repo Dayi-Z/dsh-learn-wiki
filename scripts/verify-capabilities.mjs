@@ -53,20 +53,36 @@ mgr.applyTo(agent)
 check('applyTo 调用 scoped restrict', calls.length === 1 && JSON.stringify(calls[0]) === '{"deny":["workflow","ralph"]}', JSON.stringify(calls[0]))
 check('deniedFor 反映当前掩码', JSON.stringify(mgr.deniedFor(agent)) === '["workflow","ralph"]', JSON.stringify(mgr.deniedFor(agent)))
 
-// 关键：放宽必须先 dispose，否则掩码取交集会越收越紧
+// lift 只登记，不动掩码 —— 真正的重算在下一步的 applyTo
 const before = calls.length
 const res = mgr.lift(agent, ['workflow'])
-check('lift 先 dispose 旧掩码', calls.slice(before).some(c => c.disposed !== undefined), JSON.stringify(calls.slice(before)))
-const reapply = calls.filter(c => c.deny).pop()
-check('lift 后用更窄的 deny 重新装配', JSON.stringify(reapply) === '{"deny":["ralph"]}', JSON.stringify(reapply))
-check('lift 返回结果含 lifted', JSON.stringify(res.lifted) === '["workflow"]', JSON.stringify(res))
+check('lift 不在此处调用 restrict（交给下一步）', calls.length === before, 'calls=' + (calls.length - before))
+check('lift 返回 lifted 并标记下一步生效', JSON.stringify(res.lifted) === '["workflow"]' && res.effectiveFromNextStep === true, JSON.stringify(res))
 
-// 全部放宽后不应再调 restrict（空筛选器会抛）
+// 下一步的 applyTo 应当：放开 workflow，**但保留 ralph**
+mgr.applyTo(agent)
+check('放宽后仅移除 workflow，ralph 仍在掩码里', JSON.stringify(mgr.currentDeny(agent)) === '["ralph"]', JSON.stringify(mgr.currentDeny(agent)))
+
+// ★ 回归：掩码不得在放宽过程中整体丢失
+// 曾经的实现漏传 agent 给 knownNames()，拿到 46 个的全局集，
+// workflow/ralph 都不在其中 -> base 算成空 -> 既不重装也不保留 +
+// 旧掩码被 dispose -> 限制整体消失（workflow 意外可调用），且不报错。
+const agentKeep = mkAgent()
+mgr.applyTo(agentKeep)
+const denyBefore = mgr.currentDeny(agentKeep)
+mgr.lift(agentKeep, ['ralph'])       // 只放宽一个
+mgr.applyTo(agentKeep)
+const denyAfter = mgr.currentDeny(agentKeep)
+check('★ 放宽一个不得丢掉其余的（掩码不得整体消失）',
+  denyAfter.includes('workflow') && !denyAfter.includes('ralph'),
+  'before=' + JSON.stringify(denyBefore) + ' after=' + JSON.stringify(denyAfter))
+
+// 全部放宽后不应再装配空掩码（空筛选器会抛）
 const agent2 = mkAgent()
 mgr.applyTo(agent2)
 mgr.lift(agent2, ['workflow', 'ralph'])
-const last = calls[calls.length - 1]
-check('全部放宽时不再装配空掩码（空筛选器会抛）', last.disposed !== undefined, JSON.stringify(last))
+mgr.applyTo(agent2)
+check('全部放宽后掩码撤销且不装空筛选器', JSON.stringify(mgr.currentDeny(agent2)) === '[]', JSON.stringify(mgr.currentDeny(agent2)))
 
 // 非作用域 agent 不得抛
 const bare = {}
