@@ -156,5 +156,35 @@ mgr4.applyTo(agent4)   // 第二次装配：此刻可见集只剩 read
 check('重算时仍保留已 deny 的工具（不因不可见而丢弃）',
   JSON.stringify(calls4[1]) === '{"deny":["workflow","ralph"]}', JSON.stringify(calls4[1]))
 
+// ── find_tools 必须能搜到被裁掉的工具（实测踩到）──
+// 掩码生效后 schemas(agent) 里就没有被裁工具了。若用受限视图搜索，
+// find_tools 永远找不回它唯一该找回的东西。
+console.log('\n=== find_tools 与受限视图 ===')
+let visible5 = [
+  { name: 'read', description: 'Read a file' },
+  { name: 'workflow', description: 'Orchestrate subagents at scale' },
+  { name: 'ralph', description: 'Fresh-agent Ralph loop' },
+]
+const ctx5 = { tools: { schemas: () => visible5 } }
+const agent5 = {
+  ctx: {
+    tools: {
+      restrict: (f) => {
+        for (const n of f.deny ?? []) visible5 = visible5.filter(s => s.name !== n)
+        return () => {}
+      },
+    },
+  },
+}
+const mgr5 = createCapabilityManager({ ctx: ctx5, getCfg: () => cfg, log: () => {} })
+mgr5.applyTo(agent5)
+check('装配后被裁工具已从可见集消失', !visible5.some(s => s.name === 'workflow'), visible5.map(s => s.name).join(','))
+
+const found5 = mgr5.search('workflow', 5, agent5)
+check('find_tools 仍能搜到被裁工具（用受限前缓存）', found5.some(m => m.name === 'workflow'), JSON.stringify(found5.map(m => m.name)))
+
+const lifted5 = mgr5.lift(agent5, ['workflow'])
+check('lift 报告已放宽', JSON.stringify(lifted5.lifted) === '["workflow"]', JSON.stringify(lifted5))
+
 console.log(failures === 0 ? '\nALL PASS — 能力包语义正确' : '\n' + failures + ' FAILURE(S)')
 process.exit(failures === 0 ? 0 : 1)
