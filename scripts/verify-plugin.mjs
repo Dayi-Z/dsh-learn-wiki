@@ -43,6 +43,7 @@ Widget 协议使用长度前缀分帧，魔数为 0x57 0x47。
 
 // ── mock ctx ──
 const registered = []
+const registeredRoutes = []
 const handlers = {}
 const sections = []
 const mockCtx = {
@@ -79,6 +80,8 @@ const mockCtx = {
     // 桩掉 fetch，避免测试真的走网络（fetchEvidence 会优先用 ctx.web.fetch）
     fetch: async () => ({ statusCode: 200, body: { kind: 'text', content: 'y'.repeat(400) } }),
   },
+  // UI 数据接口需要它；缺了会让整个 apply 抛异常（整轮挂掉）
+  webServer: { register: (r) => { registeredRoutes.push(r); return () => {} } },
   // 只接受真实存在的 live 事件名。此前的 mock 对任何名字都照单全收，
   // 于是 ctx.on('turn/end', ...) 这种永不触发的订阅也能"通过"测试——
   // 结果整个补料路径在生产里是死的。mock 必须能证伪。
@@ -94,7 +97,8 @@ const mockCtx = {
 
 const mod = await import('../index.js')
 check('导出 name / inject / apply', mod.name === 'dsh-learn-wiki' && Array.isArray(mod.inject) && typeof mod.apply === 'function')
-check('声明了 tools/llm/web 依赖', ['tools', 'llm', 'web'].every(s => mod.inject.includes(s)), JSON.stringify(mod.inject))
+check('声明了 tools/llm/web/webServer 依赖',
+  ['tools', 'llm', 'web', 'webServer'].every(s => mod.inject.includes(s)), JSON.stringify(mod.inject))
 
 // ── apply 不应抛异常 ──
 try { mod.apply(mockCtx, { wikiRoot: ROOT }); check('apply(ctx) 执行成功', true) }
@@ -112,6 +116,8 @@ check('挂上 agent/pre-step', Array.isArray(handlers['agent/pre-step']) && hand
 check('订阅 session/event（轮次边界的正确来源）', Array.isArray(handlers['session/event']) && handlers['session/event'].length === 1)
 check('订阅 tools/result（挣扎检测）', Array.isArray(handlers['tools/result']) && handlers['tools/result'].length === 1)
 check('订阅 agent/created（能力包装配）', Array.isArray(handlers['agent/created']) && handlers['agent/created'].length === 1)
+check('注册了 UI 数据路由', registeredRoutes.some(r => r.path === '/learn-wiki/api/state'),
+  JSON.stringify(registeredRoutes.map(r => r.path)))
 
 // 能力包必须真的能对 agent 装配掩码
 if (handlers['agent/created']?.[0]) {
