@@ -211,7 +211,7 @@ export function apply(ctx, pluginConfig = {}) {
   // ── 工具注册 ──
   ctx.effect(() => {
     // 传 getCfg 而不是快照：每次工具调用都重读配置，wiki.config.json 热生效
-    const dispose = registerTools(ctx, { getCfg, llm, caps })
+    const dispose = registerTools(ctx, { getCfg, llm, caps, log })
     return () => { try { dispose() } catch { /* noop */ } }
   }, 'dsh-learn-wiki: tools')
 
