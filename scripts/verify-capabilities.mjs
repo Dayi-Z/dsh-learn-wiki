@@ -82,5 +82,38 @@ check('多词命中并行子代理', mgr.search('subagents scale')[0]?.name === 
 check('无匹配返回空', mgr.search('zzzzz').length === 0)
 check('空查询返回目录前几项', mgr.search('').length > 0)
 
+// ── 目录不完整时的重试（实测踩到的 bug）──
+// 恢复会话时 agent 在启动早期创建，ctx.tools.schemas() 只返回 46 个工具，
+// workflow/ralph 还没注册。旧实现把它们当"未注册"滤掉 -> deny 空 -> 静默 no-op，
+// 而 agent/created 只触发一次，没有第二次机会。
+console.log('\n=== 目录不完整时的重试 ===')
+let catalogNow = [{ name: 'read' }]        // 目标一个都没注册（模拟启动早期）
+const retryCalls = []
+const retryCtx = { tools: { schemas: () => catalogNow } }
+const agentR = { ctx: { tools: { restrict: (f) => { retryCalls.push(f); return () => {} } } } }
+const mgr2 = createCapabilityManager({ ctx: retryCtx, getCfg: () => cfg, log: () => {} })
+
+check('目录不含任何目标时 applyTo 返回 false', mgr2.applyTo(agentR) === false, 'calls=' + retryCalls.length)
+check('目录不含任何目标时不装配（避免静默半装）', retryCalls.length === 0)
+
+catalogNow = [{ name: 'read' }, { name: 'workflow' }]    // 部分可见
+mgr2.ensure(agentR)
+check('部分可见时先装可见的那些', JSON.stringify(retryCalls[0]) === '{"deny":["workflow"]}', JSON.stringify(retryCalls[0]))
+
+catalogNow = [{ name: 'read' }, { name: 'workflow' }, { name: 'ralph' }]  // 补全
+mgr2.ensure(agentR)
+check('目录补齐后 ensure 补装完整集合', JSON.stringify(retryCalls[1]) === '{"deny":["workflow","ralph"]}', JSON.stringify(retryCalls[1]))
+
+const before3 = retryCalls.length
+mgr2.ensure(agentR)
+check('已装配完整后 ensure 幂等不再重装', retryCalls.length === before3, 'calls=' + retryCalls.length)
+
+// 未启用时不应留下"semi-settled"状态
+const offMgr = createCapabilityManager({ ctx: retryCtx, getCfg: () => ({ capabilities: { enabled: false } }), log: () => {} })
+const agentOff = { ctx: { tools: { restrict: () => { throw new Error('不该被调用') } } } }
+let offThrew = false
+try { offMgr.applyTo(agentOff) } catch { offThrew = true }
+check('enabled=false 时不调用 restrict 且不抛', offThrew === false)
+
 console.log(failures === 0 ? '\nALL PASS — 能力包语义正确' : '\n' + failures + ' FAILURE(S)')
 process.exit(failures === 0 ? 0 : 1)

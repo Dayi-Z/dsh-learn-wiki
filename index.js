@@ -127,7 +127,7 @@ export function apply(ctx, pluginConfig = {}) {
   // agent/created 在作用域 setup 之后、驱动器启动之前触发，
   // 所以掩码能赶上第一次提示词组装。每个 agent 只装一次。
   ctx.on('agent/created', ({ agent }) => {
-    try { caps.applyTo(agent) } catch (e) { log('capabilities hook failed (non-fatal):', e?.message ?? e) }
+    try { caps.ensure(agent) } catch (e) { log('capabilities hook failed (non-fatal):', e?.message ?? e) }
   })
 
   // ── 挣扎检测：真正的触发器 ──
@@ -167,7 +167,12 @@ export function apply(ctx, pluginConfig = {}) {
     try { cfg = await getCfg() } catch { return decision }
     if (!cfg.enabled) return decision
     // 用户新提示词到达 = 新任务，上一轮的挣扎不该污染这一次的判定
-    if (step === 1) tracker.reset(agent)
+    if (step === 1) {
+      tracker.reset(agent)
+      // 补装能力包：恢复会话时 agent 在启动早期创建，那一刻工具目录还不全
+      // （实测只有 46 个）。pre-step 在提示词组装之前，所以这里补装仍能生效。
+      try { caps.ensure(agent) } catch (e) { log('capabilities ensure failed (non-fatal):', e?.message ?? e) }
+    }
     if (step !== 1) return decision                                  // 每轮第一步 = "工作前"
     if (decision.kind === 'reject') return decision
     if (!decision.messages || decision.messages.length === 0) return decision
