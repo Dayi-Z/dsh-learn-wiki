@@ -20,6 +20,7 @@ import { createLlm } from './lib/llm.js'
 import { createLogger } from './lib/log.js'
 import { createStruggleTracker, recordStruggle, symptomQuery } from './lib/struggle.js'
 import { createCapabilityManager } from './lib/capabilities.js'
+import { loadUsage, saveUsage, recordHit, recordConfirmed, recordSuspect, usageLabel } from './lib/usage.js'
 import { registerTools } from './lib/tools.js'
 
 export const name = 'dsh-learn-wiki'
@@ -199,6 +200,11 @@ export function apply(ctx, pluginConfig = {}) {
   // 补料进行中又来了新请求 -> 结束后补跑一次
   let rerunAfterAcquire = false
 
+  // 证据采集：agentId -> { pages:Set, struggled:boolean }
+  //   命中不算确认。确认要看这一轮后来**有没有再挣扎**。
+  //   命中后仍挣扎 = 疑似有害知识 —— 这是自动沉淀最致命、也最可测的盲区。
+  const turnInjections = new Map()
+
   // 落盘日志：桌面版里插件 stdout 基本不可见，诊断只能靠文件
   const log = createLogger(baseRoot)
 
@@ -246,6 +252,19 @@ export function apply(ctx, pluginConfig = {}) {
       const fired = tracker.observe(agent, exec, result)
       if (fired.length === 0) return
       log('struggle: ' + fired.map(f => f.type + '×' + f.count).join(', ') + '  (' + (fired[0].detail ?? '') + ')')
+
+      // ★ 最有价值的一类证据：这一轮的注入**没能阻止**挣扎。
+      // 那条知识要么没用，要么有害。降权它（不是删除 —— 降权可逆）。
+      const inj = agent.id ? turnInjections.get(agent.id) : null
+      if (inj && !inj.struggled && inj.pages.size > 0) {
+        inj.struggled = true
+        void loadUsage(liveCfg.wikiRoot)
+          .then(u => { recordSuspect(u, [...inj.pages]); return saveUsage(liveCfg.wikiRoot, u) })
+          .then(() => log('usage: 记为嫌疑 ' + [...inj.pages].join(',')))
+          .catch((e) => log('usage suspect failed (non-fatal):', e?.message ?? e))
+      } else if (agent.id && !inj) {
+        // 没注入过就没得判 —— 不要伪造证据
+      }
       void recordStruggle(liveCfg.wikiRoot, {
         ts: new Date().toISOString(),
         sessionId: agent.id ?? '',   // 必须是字符串：undefined 会让工具输出非 lossless JSON
@@ -315,7 +334,9 @@ export function apply(ctx, pluginConfig = {}) {
       const pool = recallable(pages, { minConfidence: cfg.minConfidence })
       if (pool.length === 0) return decision
       const corpus = buildCorpus(pool)
-      const hits = scoreQuery(corpus, query)
+      // 排序 = 相似度 × 强化因子（无证据时因子为 1，阈值语义不变）
+      const usage = await loadUsage(cfg.wikiRoot)
+      const hits = scoreQuery(corpus, query, { stats: usage.pages })
       const t = triage(hits, cfg)
       signal?.throwIfAborted?.()
 
@@ -339,6 +360,13 @@ export function apply(ctx, pluginConfig = {}) {
       const msg = buildUserMessage(text)
       const lastClaimed = decision.messages.findLastIndex(m => m && messages && messages.includes(m))
       const at = lastClaimed >= 0 ? lastClaimed + 1 : decision.messages.length
+
+      // 记录命中，并把这一轮注入了哪些页记下来，供后续判定确认/嫌疑
+      const injectedIds = [...t.hit, ...t.weak].map(h => h.page.id)
+      recordHit(usage, injectedIds)
+      void saveUsage(cfg.wikiRoot, usage).catch(() => {})
+      if (agent?.id) turnInjections.set(agent.id, { pages: new Set(injectedIds), struggled: false })
+
       log('inject bucket=' + t.bucket + ' best=' + t.best + ' hit=' + t.hit.length + ' weak=' + t.weak.length)
       return { kind: 'enter', messages: decision.messages.toSpliced(at, 0, msg) }
     } catch (e) {
@@ -395,7 +423,24 @@ export function apply(ctx, pluginConfig = {}) {
   // 正确签名是 (session, event)，事件类型在 event.type 上。
   try {
     ctx.on('session/event', (session, event) => {
-      if (event && event.type === 'turn/end') scheduleAcquire()
+      if (!event || event.type !== 'turn/end') return
+      // ★ 该轮没有挣扎 -> 本轮注入的知识算一次**弱确认**。
+      // 这不是"它是对的"的证明，只是"它没坏事"的证据 —— 所以叫弱确认，
+      // 而且只用来做排序加权，不当作提交依据。
+      if (turnInjections.size > 0) {
+        const toConfirm = []
+        for (const [agentId, rec] of turnInjections.entries()) {
+          if (!rec.struggled && rec.pages.size > 0) toConfirm.push(...rec.pages)
+          turnInjections.delete(agentId)
+        }
+        if (toConfirm.length > 0) {
+          void loadUsage(liveCfg.wikiRoot)
+            .then(u => { recordConfirmed(u, toConfirm); return saveUsage(liveCfg.wikiRoot, u) })
+            .then(() => log('usage: 记为确认 ' + toConfirm.join(',')))
+            .catch((e) => log('usage confirm failed (non-fatal):', e?.message ?? e))
+        }
+      }
+      scheduleAcquire()
     })
   } catch (e) { log('session/event hook unavailable:', e?.message ?? e) }
 }

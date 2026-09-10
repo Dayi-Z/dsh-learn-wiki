@@ -285,6 +285,37 @@ for (const r of [
   check('输出合法: ' + r.label, r.ok, r.detail)
 }
 
+// ── ★ 证据链的完整闭环：同一个 agent 先被注入命中，然后仍然挣扎 ──
+// 这是"疑似有害知识"的唯一采集路径，必须端到端验证。
+// （前面的注入测试用的是无 id 的 agent，凑不出这条链路。）
+if (handlers['tools/result']?.[0]) {
+  const agS = { id: 'sess-suspect', ctx: { tools: { restrict: () => () => {} } } }
+  const wm = { role: 'user', content: [{ type: 'text', text: 'Widget 协议的分帧和魔数是什么' }] }
+  const r1 = await preStep({ agent: agS, messages: [wm], step: 1, signal: { throwIfAborted() {} } }, async () => ({ kind: 'enter', messages: [wm] }))
+  check('★ 同轮先发生了一次命中注入', r1.messages.length === 2, 'len=' + r1.messages.length)
+  // 紧接着在同一轮里挣扎（注入没能阻止它）
+  handlers['tools/result'][0]({ name: 'edit', arguments: { file_path: 'D:/x/widget.js' }, agent: agS }, { isError: false })
+  handlers['tools/result'][0]({ name: 'edit', arguments: { file_path: 'D:/x/widget.js' }, agent: agS }, { isError: false })
+  handlers['tools/result'][0]({ name: 'edit', arguments: { file_path: 'D:/x/widget.js' }, agent: agS }, { isError: false })
+  handlers['tools/result'][0]({ name: 'edit', arguments: { file_path: 'D:/x/widget.js' }, agent: agS }, { isError: false })
+  await new Promise(r => setTimeout(r, 600))
+}
+
+// ── ★ 证据链：注入记 hits；命中后仍挣扎记 suspect ──
+// 这张图是"要不要自动沉淀"的唯一依据，所以必须端到端验证它真的在采。
+// 注意：必须在 rm(ROOT) **之前** —— 目录一删就读不到了。
+{
+  const { loadUsage } = await import('../lib/usage.js')
+  const u = await loadUsage(ROOT)
+  const ids = Object.keys(u.pages ?? {})
+  check('★ 使用证据已落盘（usage.json）', ids.length > 0, 'pages=' + ids.length)
+  const withHits = ids.filter(id => (u.pages[id].hits ?? 0) > 0)
+  check('★ 注入被记成 hits', withHits.length > 0, JSON.stringify(withHits.map(id => id + ':hits=' + u.pages[id].hits)))
+  const withSuspect = ids.filter(id => (u.pages[id].suspect ?? 0) > 0)
+  check('★ 命中后仍挣扎被记成 suspect（最关键的一类证据）', withSuspect.length > 0,
+    JSON.stringify(withSuspect.map(id => id + ':suspect=' + u.pages[id].suspect)))
+}
+
 await rm(ROOT, { recursive: true, force: true })
 console.log(failures === 0 ? '\nALL PASS — 插件接线正确' : '\n' + failures + ' FAILURE(S)')
 process.exit(failures === 0 ? 0 : 1)
