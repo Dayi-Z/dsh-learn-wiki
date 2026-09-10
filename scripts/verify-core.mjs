@@ -2,6 +2,7 @@
 // 跑在真实的 D:\Harness\dsh-wiki 上，而不是 fixture，确保格式约定与实物一致。
 import { loadPages, commitReadiness, deriveId, slugify } from '../lib/wiki.js'
 import { looksLikeGap } from '../lib/recall.js'
+import { fetchUrlText, htmlToText } from '../lib/acquire.js'
 import { buildCorpus, scoreQuery, triage, recallable } from '../lib/recall.js'
 
 const ROOT = process.argv[2] || 'D:\\Harness\\dsh-wiki'
@@ -67,6 +68,26 @@ for (const [q, want] of [
 ]) {
   check('looksLikeGap(' + q.slice(0, 18) + ') === ' + want, looksLikeGap(q) === want, 'got ' + looksLikeGap(q))
 }
+
+// ── 正文抓取：宿主有 fetch seam 时必须优先走它（不联网即可验证）──
+console.log('\n=== 正文抓取 ===')
+check('htmlToText 去脚本/标签并解实体',
+  htmlToText('<b>Hi</b><script>var x=1</script>&amp;bye') === 'Hi &bye',
+  JSON.stringify(htmlToText('<b>Hi</b><script>var x=1</script>&amp;bye')))
+
+const seamText = 'x'.repeat(300)
+const viaSeam = await fetchUrlText(
+  { web: { fetch: async () => ({ statusCode: 200, body: { kind: 'text', content: seamText } }) } },
+  'https://seam.invalid/', { timeoutMs: 1000 })
+check('优先走宿主 ctx.web.fetch seam', viaSeam === seamText, 'len=' + viaSeam.length)
+
+const htmlSeam = await fetchUrlText(
+  { web: { fetch: async () => ({ statusCode: 200, body: { kind: 'html', content: '<p>' + 'y'.repeat(300) + '</p>' } }) } },
+  'https://seam.invalid/', { timeoutMs: 1000 })
+check('seam 返回 html 时自动转文本', htmlSeam.startsWith('yyy') && !htmlSeam.includes('<p>'), JSON.stringify(htmlSeam.slice(0, 20)))
+
+const noSeam = await fetchUrlText({ web: {} }, 'https://nonexistent.invalid-host-xyz/', { timeoutMs: 3000 })
+check('无 seam 且直连失败时返回空串而非抛异常', noSeam === '', 'got ' + JSON.stringify(noSeam))
 
 console.log(failures === 0 ? '\nALL PASS' : '\n' + failures + ' FAILURE(S)')
 process.exit(failures === 0 ? 0 : 1)
