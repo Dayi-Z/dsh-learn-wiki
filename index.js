@@ -30,14 +30,66 @@ export const inject = ['tools', 'llm', 'web']
  * 优先用宿主自己的 createUserMessage（保证消息形状与宿主版本一致）；
  * 若导入失败或形状漂移，退化为最小可用形状，而不是让整轮崩掉。
  */
-function buildUserMessage(text) {
-  const payload = { content: [{ type: 'text', text }], source: { kind: 'plugin', plugin: name } }
+function buildUserMessage(text, source) {
+  const payload = { content: [{ type: 'text', text }], source: source ?? { kind: 'plugin', plugin: name } }
   try {
     if (typeof hostCreateUserMessage === 'function') return hostCreateUserMessage(payload)
   } catch (e) {
     console.warn('[dsh-learn-wiki] createUserMessage failed, using minimal shape:', e?.message ?? e)
   }
   return { role: 'user', ...payload }
+}
+
+const HINDSIGHT_MARK = '<hindsight_knowledge>'
+/**
+ * 把 hindsight 的注入块换成短指针。
+ *
+ * 为什么：该块约 1,900 字符，其中 TOOL_GUIDE 逐条重述了 8 个工具的用途，
+ * 而那些描述**已经在工具 schema 里**（那 8 个工具本身占 1,285 token）。
+ * 纯重复，而且它的知识页清单目前还是坏的（永远显示"No knowledge pages yet"）。
+ *
+ * 保留一行指针的原因是：工具 schema 只说明"怎么用"，不说明"现在该用"。
+ * 那一句时机提示是有价值的，所以留 ~50 token 而不是全删。
+ */
+const HINDSIGHT_COMPACT = HINDSIGHT_MARK
+  + '本仓库有 Hindsight 长期记忆与知识页。回答项目相关问题前先用 hindsight_search_knowledge_pages 检索并引用页面；'
+  + '开始非平凡任务前用 hindsight_list_knowledge_pages 看项目已知什么。详见各 hindsight_* 工具的 schema。'
+  + '</hindsight_knowledge>'
+
+function compactHindsight(messages) {
+  let changed = false
+  const out = messages.map((m) => {
+    const parts = m?.content
+    if (!Array.isArray(parts)) return m
+    let hit = false
+    const next = parts.map((p) => {
+      if (p && p.type === 'text' && typeof p.text === 'string' && p.text.includes(HINDSIGHT_MARK)) {
+        hit = true
+        return { ...p, text: HINDSIGHT_COMPACT }
+      }
+      return p
+    })
+    if (!hit) return m
+    changed = true
+    // 保留原来源归属，只换正文
+    return buildUserMessage(HINDSIGHT_COMPACT, m.source)
+  })
+  return changed ? { messages: out, changed: true } : { messages, changed: false }
+}
+
+/**
+ * 剥掉注入块再当查询用。
+ *
+ * 为什么：注入的 <system-reminder> / <hindsight_knowledge> 是"系统说的话"，
+ * 不是"用户问的问题"。拿它们去检索会污染打分，而且我们自己的注入会被
+ * 下一轮再检索一次——一个自我强化的回环。
+ */
+function stripInjected(text) {
+  return String(text ?? '')
+    .replace(/<hindsight_knowledge>[\s\S]*?<\/hindsight_knowledge>/g, ' ')
+    .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, ' ')
+    .replace(/<[a-z_]+_knowledge>[\s\S]*?<\/[a-z_]+_knowledge>/g, ' ')
+    .trim()
 }
 
 /** 从已领取的用户消息里抽出纯文本查询。 */
@@ -50,7 +102,7 @@ function queryFrom(messages) {
       for (const p of content) if (p && p.type === 'text' && typeof p.text === 'string') parts.push(p.text)
     }
   }
-  return parts.join('\n').trim().slice(0, 1500)
+  return stripInjected(parts.join('\n')).slice(0, 1500)
 }
 
 /** 渲染注入块：hit 给正文（可信），weak 只给标题索引（低置信，按需自取）。 */
@@ -162,11 +214,21 @@ export function apply(ctx, pluginConfig = {}) {
 
   // ── 旋钮 A：工作前自动注入（命中则注入；未命中则记 gap）──
   ctx.on('agent/pre-step', async ({ agent, messages, step, signal }, next) => {
-    const decision = await next()
+    // let（不是 const）：压缩 hindsight 块时要替换整个决策对象
+    let decision = await next()
     let cfg
     try { cfg = await getCfg() } catch { return decision }
     if (!cfg.enabled) return decision
     // 用户新提示词到达 = 新任务，上一轮的挣扎不该污染这一次的判定
+    // 压缩 hindsight 注入块：它在 prepend 的钩子里已进入批次，这里后处理
+    if (liveCfg.compactHindsightBlock !== false && decision.messages?.length) {
+      const c = compactHindsight(decision.messages)
+      if (c.changed) {
+        decision = { ...decision, messages: c.messages }
+        log('compact: hindsight 注入块已压缩为指针')
+      }
+    }
+
     if (step === 1) {
       tracker.reset(agent)
       // 补装能力包：恢复会话时 agent 在启动早期创建，那一刻工具目录还不全

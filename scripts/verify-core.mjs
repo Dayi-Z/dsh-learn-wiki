@@ -89,5 +89,12 @@ check('seam 返回 html 时自动转文本', htmlSeam.startsWith('yyy') && !html
 const noSeam = await fetchUrlText({ web: {} }, 'https://nonexistent.invalid-host-xyz/', { timeoutMs: 3000 })
 check('无 seam 且直连失败时返回空串而非抛异常', noSeam === '', 'got ' + JSON.stringify(noSeam))
 
+// ── 注入块不得进入检索查询 ──
+// 注入的是"系统说的话"，不是"用户问的问题"。混进去会污染打分，
+// 而且我们自己的注入会被下一轮再检索一次——自我强化的回环。
+console.log('\n=== 查询提取 ===')
+const qq = scoreQuery(buildCorpus(pool), 'x')  // 仅确认语料可用
+check('语料可用于查询提取测试', Array.isArray(qq))
+
 console.log(failures === 0 ? '\nALL PASS' : '\n' + failures + ' FAILURE(S)')
 process.exit(failures === 0 ? 0 : 1)

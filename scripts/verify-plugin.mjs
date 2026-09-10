@@ -45,6 +45,9 @@ const mockCtx = {
       { name: 'read', description: 'Read a file' },
       { name: 'workflow', description: 'Run a JavaScript workflow script that orchestrates subagents at scale' },
       { name: 'ralph', description: 'Run a foreground fresh-agent Ralph loop' },
+      { name: 'hindsight_sync_status', description: 'Report memory bank sync state' },
+      { name: 'hindsight_diagnose', description: 'Report runtime diagnostics' },
+      { name: 'hindsight_search_knowledge_pages', description: 'Search knowledge pages' },
     ]),
   },
   llm: {
@@ -93,7 +96,16 @@ if (handlers['agent/created']?.[0]) {
   const agent = { ctx: { tools: { restrict: (f) => { restrictCalls.push(f); return () => {} } } } }
   try { handlers['agent/created'][0]({ agent }) } catch (e) { check('agent/created 钩子不抛', false, e.message) }
   check('能力包对 agent 装配了 deny 掩码', restrictCalls.length === 1, JSON.stringify(restrictCalls))
-  check('默认裁掉 workflow 与 ralph', JSON.stringify(restrictCalls[0]?.deny?.sort()) === JSON.stringify(['ralph', 'workflow']), JSON.stringify(restrictCalls[0]))
+  const d0 = restrictCalls[0]?.deny ?? []
+  check('默认裁掉 workflow 与 ralph', d0.includes('workflow') && d0.includes('ralph'), JSON.stringify(d0))
+
+  // 记忆族：只裁诊断工具，工作用工具必须保留
+  const restrictCalls2 = []
+  const agent2 = { ctx: { tools: { restrict: (f) => { restrictCalls2.push(f); return () => {} } } } }
+  handlers['agent/created'][0]({ agent: agent2 })
+  const denied = restrictCalls2[0]?.deny ?? []
+  check('记忆族诊断工具被裁', denied.includes('hindsight_sync_status') && denied.includes('hindsight_diagnose'), JSON.stringify(denied))
+  check('记忆族工作用工具保留', !denied.includes('hindsight_search_knowledge_pages'), JSON.stringify(denied))
 }
 
 // 挣扎检测必须真的能从工具流里认出一堵墙
@@ -137,6 +149,16 @@ const injectedText = JSON.stringify(injected?.content ?? '')
 check('注入内容引用了命中页 id', injectedText.includes('widget-protocol'), injectedText.slice(0, 160))
 check('注入内容带 system-reminder 包裹', injectedText.includes('system-reminder'))
 check('注入消息排在用户消息之后', res.messages?.[0] === userMsg)
+
+// ── pre-step：hindsight 注入块必须被压成短指针 ──
+const bigBlock = '<hindsight_knowledge>This repository has a Hindsight memory and knowledge base. '
+  + 'The tools below are registered, but you must actually CALL them at the right moments: ' + 'x'.repeat(1800) + '</hindsight_knowledge>'
+const hsMsg = { role: 'user', content: [{ type: 'text', text: bigBlock }], source: { kind: 'plugin', plugin: 'hindsight-coding-agents' } }
+// 标为 step 2 以避免把这段合成文本写成 gap（污染共享队列）
+const resHs = await preStep({ agent: {}, messages: [hsMsg], step: 2, signal: { throwIfAborted() {} } }, async () => ({ kind: 'enter', messages: [hsMsg] }))
+const hsText = JSON.stringify(resHs.messages?.[0]?.content ?? '')
+check('hindsight 块被压缩', hsText.length < 600, 'len=' + hsText.length + ' (原始 ' + bigBlock.length + ')')
+check('压缩后仍保留检索时机提示', hsText.includes('hindsight_search_knowledge_pages'))
 
 // ── pre-step：非第一步不注入 ──
 const res2 = await preStep({ agent: {}, messages: [userMsg], step: 2, signal: { throwIfAborted() {} } }, async () => ({ kind: 'enter', messages: [userMsg] }))
