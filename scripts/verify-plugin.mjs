@@ -154,6 +154,9 @@ for (const r of [
   await callTool('wiki_learn', { title: '临时测试页', body: '内容', sources: 'https://e.com' }),
   await callTool('wiki_commit', { id: '根本不存在的页面' }),
   await callTool('wiki_acquire', { dryRun: true }),
+  // 必须测非 dryRun 路径：details 的 page 字段只在 staged 时存在，
+  // 之前只测 dryRun，让它带着 undefined 溜了过去。
+  await callTool('wiki_acquire', { limit: 1 }),
 ]) {
   check('输出合法: ' + r.label, r.ok, r.detail)
 }
