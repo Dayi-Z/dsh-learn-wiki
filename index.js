@@ -15,16 +15,16 @@ import { createUserMessage as hostCreateUserMessage } from '@deepseek-ai/dsh-llm
 import { loadConfig, DEFAULTS } from './lib/config.js'
 import { loadPages, ensureRepo } from './lib/wiki.js'
 import { buildCorpus, scoreQuery, triage, recallable, looksLikeGap } from './lib/recall.js'
-import { appendGap, runAcquisition } from './lib/acquire.js'
+import { appendGap, runAcquisition, readGaps } from './lib/acquire.js'
 import { createLlm } from './lib/llm.js'
 import { createLogger } from './lib/log.js'
-import { createStruggleTracker, recordStruggle, symptomQuery } from './lib/struggle.js'
+import { createStruggleTracker, recordStruggle, symptomQuery, readStruggles } from './lib/struggle.js'
 import { createCapabilityManager } from './lib/capabilities.js'
-import { loadUsage, saveUsage, recordHit, recordConfirmed, recordSuspect, usageLabel } from './lib/usage.js'
+import { loadUsage, saveUsage, recordHit, recordConfirmed, recordSuspect, usageLabel, classify, shouldQuarantine, reinforcementFactor, DEFAULT_POLICY } from './lib/usage.js'
 import { registerTools } from './lib/tools.js'
 
 export const name = 'dsh-learn-wiki'
-export const inject = ['tools', 'llm', 'web']
+export const inject = ['tools', 'llm', 'web', 'webServer']
 
 /**
  * 构造注入用的 user 消息。
@@ -229,6 +229,79 @@ export function apply(ctx, pluginConfig = {}) {
         + 'Never commit a page without sources.',
     })
   })
+
+  // ── UI 数据接口 ──
+  // 浏览器半（client/client.js）通过这一个只读端点拿全部状态。
+  // 一个端点而不是多个：状态小、变化快、且 UI 只做展示，不需要细粒度刷新。
+  ctx.effect(() => {
+    const handler = async (req, res) => {
+      try {
+        const cfg = await getCfg()
+        const send = (code, obj) => {
+          const body = JSON.stringify(obj)
+          res.writeHead(code, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+          res.end(body)
+        }
+        const url = new URL(req.url, 'http://127.0.0.1')
+        if (url.pathname !== '/learn-wiki/api/state') { send(404, { ok: false, error: 'not found' }); return }
+
+        const { pages } = await loadPages(cfg.wikiRoot)
+        const usage = await loadUsage(cfg.wikiRoot)
+        const policy = { ...DEFAULT_POLICY, ...(cfg.usagePolicy ?? {}) }
+        const now = Date.now()
+
+        const committed = pages.filter(p => p.status === 'committed').map(p => {
+          const st = usage.pages[p.id]
+          return {
+            id: p.id, title: p.title, category: p.category, confidence: p.confidence,
+            created: p.created, sources: (p.sources ?? []).length,
+            cls: classify(st, p, { now, policy }),
+            hits: st?.hits ?? 0, confirmed: st?.confirmed ?? 0, suspect: st?.suspect ?? 0,
+            factor: Number(reinforcementFactor(st, now).toFixed(3)),
+            quarantined: shouldQuarantine(st, policy),
+          }
+        })
+        const staged = pages.filter(p => p.status === 'staged').map(p => ({
+          id: p.id, title: p.title, category: p.category, confidence: p.confidence,
+          sources: (p.sources ?? []).length,
+        }))
+        const counts = {}
+        for (const p of committed) counts[p.cls] = (counts[p.cls] ?? 0) + 1
+
+        const gaps = await readGaps(cfg.wikiRoot)
+        const gapCounts = {}
+        for (const g of gaps) gapCounts[g.status] = (gapCounts[g.status] ?? 0) + 1
+        const struggles = await readStruggles(cfg.wikiRoot, 200)
+        const sigCounts = {}
+        for (const r of struggles) for (const s of (r.signals ?? [])) sigCounts[s.type] = (sigCounts[s.type] ?? 0) + 1
+
+        send(200, {
+          ok: true,
+          ts: new Date().toISOString(),
+          app: { wikiRoot: cfg.wikiRoot, version: '0.1.0' },
+          capabilities: {
+            enabled: cfg.capabilities?.enabled === true,
+            configuredDeny: [
+              ...(cfg.capabilities?.explicitOnly ?? []),
+              ...(cfg.capabilities?.diagnostics ?? []),
+              ...(cfg.capabilities?.deny ?? []),
+            ],
+            catalog: caps.catalogSnapshot?.(
+              [...(cfg.capabilities?.explicitOnly ?? []), ...(cfg.capabilities?.diagnostics ?? []), ...(cfg.capabilities?.deny ?? [])]
+            ) ?? { items: [], total: 0, capturedAt: false },
+          },
+          knowledge: { committed, staged, counts, threshold: { hit: cfg.hitThreshold, weak: cfg.weakThreshold } },
+          gaps: { counts: gapCounts, total: gaps.length, recent: gaps.slice(-12).map(g => ({ query: String(g.query).slice(0, 90), status: g.status })) },
+          struggles: { total: struggles.length, counts: sigCounts, recent: struggles.slice(-8).map(r => ({ ts: r.ts, signals: (r.signals ?? []).map(s => s.type) })) },
+        })
+      } catch (e) {
+        try { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ ok: false, error: String(e?.message ?? e) })) } catch {}
+      }
+    }
+    const dispose = ctx.webServer.register({ kind: 'exact', path: '/learn-wiki/api/state', handler })
+    log('ui: /learn-wiki/api/state 已注册')
+    return () => { try { dispose() } catch {} }
+  }, 'dsh-learn-wiki: ui route')
 
   // ── 能力包装配 ──
   // agent/created 在作用域 setup 之后、驱动器启动之前触发，
