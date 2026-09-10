@@ -3,6 +3,7 @@
 // 目的：不必重启 DSH 就能抓出事件名拼错 / API 用错这类错误。
 import { rm, mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import { readFile } from 'node:fs/promises'
 import { ensureRepo } from '../lib/wiki.js'
 
 const ROOT = '.tmp-plugin-test'
@@ -14,6 +15,13 @@ const check = (label, ok, detail = '') => {
 
 await rm(ROOT, { recursive: true, force: true })
 await ensureRepo(ROOT)
+// 测试里关掉补料的冷却与间隔，否则第二条挣扎会撞上 20s 冷却而不触发补料
+await writeFile(join(ROOT, 'wiki.config.json'), JSON.stringify({
+  acquireCooldownMs: 0,
+  minIntervalMs: 0,
+  maxAcquisitionsPerRun: 5,
+  struggleCooldownMs: 0,
+}), 'utf8')
 
 // 放一页已固化知识，用于验证 hit 路径
 await writeFile(join(ROOT, 'pages', 'fact', 'widget-protocol.md'), `---
@@ -53,9 +61,24 @@ const mockCtx = {
   llm: {
     listProviders: () => [{ id: 'mock' }],
     listModels: async () => [{ id: 'mock-model' }],
-    stream: async function* () {},
+    // 让蒸馏器真的产出一页，才能测到"投递回当前轮"这条链路
+    stream: async function* () {
+      yield { type: 'text-delta', text: JSON.stringify({
+        skip: false,
+        id: 'widget-churn-fix',
+        title: 'Widget 反复修改不生效的常见原因',
+        category: 'lesson',
+        confidence: 0.75,
+        tags: ['widget'],
+        body: 'Widget 的改动需要先清缓存再重建，否则旧产物会被继续加载。',
+      }) }
+    },
   },
-  web: { search: async () => ({ content: 'c', sources: [{ url: 'https://e.com', title: 't', snippet: 's' }] }) },
+  web: {
+    search: async () => ({ content: 'c', sources: [{ url: 'https://e.com/doc', title: 'Doc', snippet: 'snippet text here' }] }),
+    // 桩掉 fetch，避免测试真的走网络（fetchEvidence 会优先用 ctx.web.fetch）
+    fetch: async () => ({ statusCode: 200, body: { kind: 'text', content: 'y'.repeat(400) } }),
+  },
   // 只接受真实存在的 live 事件名。此前的 mock 对任何名字都照单全收，
   // 于是 ctx.on('turn/end', ...) 这种永不触发的订阅也能"通过"测试——
   // 结果整个补料路径在生产里是死的。mock 必须能证伪。
@@ -153,6 +176,29 @@ if (sections[0]) check('提示词段文本非空', typeof sections[0].text === '
 
 // ── pre-step：命中应注入 ──
 const preStep = handlers['agent/pre-step'][0]
+
+// ── ★ 端到端：挣扎 → 症状 gap → 补料 → 投递回**当前这一轮** ──
+// 放在最前面跑：后面的 wiki_acquire 测试会直接消费 gap（不走投递路径），
+// 先跑才能隔离出投递这条链路的真实行为。
+// 这是最初那句诉求的落点："agent 反复修改走进死胡同，永远不会去网上搜一下"。
+if (handlers['tools/result']?.[0]) {
+  const injected = []
+  const agD = {
+    id: 'sess-deliver',
+    inject: (msg) => { injected.push(msg); return 'msg-id' },
+    ctx: { tools: { restrict: () => () => {} } },
+  }
+  const um = { role: 'user', content: [{ type: 'text', text: 'Gadget 改动后不生效，帮我看看' }] }
+  await preStep({ agent: agD, messages: [um], step: 1, signal: { throwIfAborted() {} } }, async () => ({ kind: 'enter', messages: [um] }))
+  for (let i = 0; i < 4; i++) handlers['tools/result'][0]({ name: 'edit', arguments: { file_path: 'D:/x/gadget.js' }, agent: agD }, { isError: false })
+  for (let i = 0; i < 40 && injected.length === 0; i++) await new Promise(r => setTimeout(r, 250))
+
+  check('★ 补料完成后投递回当前轮（agent.inject 被调用）', injected.length >= 1, 'injected=' + injected.length)
+  const msgText = JSON.stringify(injected[0]?.content ?? '')
+  check('★ 投递内容含找到的知识', msgText.includes('widget-churn-fix') || msgText.includes('Widget 反复修改'), msgText.slice(0, 160))
+  check('★ 投递内容明确标注未核实', msgText.includes('未核实'), msgText.slice(0, 120))
+  check('★ 投递用 system-reminder 包裹', msgText.includes('system-reminder'))
+}
 const userMsg = { role: 'user', content: [{ type: 'text', text: 'Widget 协议的分帧和魔数是什么' }] }
 const agent = {}
 const decision = { kind: 'enter', messages: [userMsg] }

@@ -51,6 +51,49 @@ const HINDSIGHT_MARK = '<hindsight_knowledge>'
  * 保留一行指针的原因是：工具 schema 只说明"怎么用"，不说明"现在该用"。
  * 那一句时机提示是有价值的，所以留 ~50 token 而不是全删。
  */
+/**
+ * 把刚补到的知识投递进**当前这一轮**。
+ *
+ * 这是整个闭环的最后一环，也是最初那句诉求的落点：
+ * "agent 反复修改走进死胡同，永远不会去网上搜一下有没有更简单的方法"。
+ *
+ * 机制：agent.inject() 把消息排进 next-step 上下文，运行中的驱动器会在
+ * 最近的后续 pre-step 边界领取 —— 所以模型在**自己下一步**就看到，
+ * 而不是等下一轮。这是唯一能真正打断循环的时点。
+ *
+ * 关于 staged：两段式设计让 staged 不参与**自动召回**（防投毒）。
+ * 但挣扎时的主动投递是另一回事 —— 等人来 commit 意味着循环继续。
+ * 所以照投，但**明确标注未核实**，让模型自己判断可信度。
+ */
+async function deliverToCurrentTurn(agent, page, log) {
+  if (!agent || typeof agent.inject !== 'function') {
+    log('deliver: agent.inject 不可用，跳过')
+    return false
+  }
+  const body = String(page.body ?? '').trim().slice(0, 1800)
+  const src = (page.sources ?? []).slice(0, 3).join('\n  ')
+  const text = [
+    '<system-reminder>',
+    '你似乎在同一处反复尝试。下面是刚从网络上找到的相关资料，**尚未核实、未提交审核**，仅供你判断参考：',
+    '',
+    '## ' + page.title,
+    body,
+    '',
+    src ? '来源:\n  ' + src : '',
+    '',
+    '如果与当前情况不符，忽略它并继续你自己的判断。',
+    '</system-reminder>',
+  ].filter(Boolean).join('\n')
+  try {
+    agent.inject(buildUserMessage(text, { kind: 'plugin', plugin: name }))
+    log('deliver: 已投递到当前轮 -> ' + page.id)
+    return true
+  } catch (e) {
+    log('deliver failed (non-fatal):', e?.message ?? e)
+    return false
+  }
+}
+
 const HINDSIGHT_COMPACT = HINDSIGHT_MARK
   + '本仓库有 Hindsight 长期记忆与知识页。回答项目相关问题前先用 hindsight_search_knowledge_pages 检索并引用页面；'
   + '开始非平凡任务前用 hindsight_list_knowledge_pages 看项目已知什么。详见各 hindsight_* 工具的 schema。'
@@ -151,6 +194,10 @@ export function apply(ctx, pluginConfig = {}) {
   // 后台补料互斥 + 冷却
   let acquiring = false
   let lastAcquire = 0
+  // 最近一个卡住的 agent。补料是异步的，完成时要把结果投回它那一轮。
+  let strugglingAgent = null
+  // 补料进行中又来了新请求 -> 结束后补跑一次
+  let rerunAfterAcquire = false
 
   // 落盘日志：桌面版里插件 stdout 基本不可见，诊断只能靠文件
   const log = createLogger(baseRoot)
@@ -213,6 +260,8 @@ export function apply(ctx, pluginConfig = {}) {
         const q = symptomQuery(fired, lastQuery.get(agent) ?? '')
         if (q && q.length >= 6) {
           log('struggle -> gap: ' + q.slice(0, 90))
+          // 记住是哪个 agent 卡住了 —— 补料完成后要把结果投递回**它**的这一轮
+          strugglingAgent = agent
           void appendGap(liveCfg.wikiRoot, { query: q, score: 0, sessionId: agent.id ?? '' })
             .then(() => scheduleAcquire())   // 立刻推一次，不等轮次结束
             .catch((e) => log('struggle gap failed (non-fatal):', e?.message ?? e))
@@ -303,7 +352,10 @@ export function apply(ctx, pluginConfig = {}) {
     setTimeout(() => { void acquireNow('turn-end') }, 0)
   }
   const acquireNow = async (why) => {
-    if (acquiring) return
+    // 正在补料时不能直接丢弃这次的请求 —— 那样"卡住时正好有补料在跑"
+    // 就会让这次挣扎白登记（gap 留着但没人处理，也不会投递）。
+    // 记一个待办，等当前这轮结束后自动再跑一次。
+    if (acquiring) { rerunAfterAcquire = true; return }
     let cfg
     try { cfg = await getCfg() } catch { return }
     if (!cfg.enabled || !cfg.autoAcquire) return
@@ -311,13 +363,30 @@ export function apply(ctx, pluginConfig = {}) {
     if (now - lastAcquire < cfg.acquireCooldownMs) return
     acquiring = true
     lastAcquire = now
+    // 本轮卡住的那个 agent（可能被 turn/end 的调用抢先，所以用模块级变量记住）
+    const target = strugglingAgent
+    strugglingAgent = null
+    let consumed = false
     try {
-      const summary = await runAcquisition({ ctx, llm, repoRoot: cfg.wikiRoot, cfg, log })
+      const summary = await runAcquisition({
+        ctx, llm, repoRoot: cfg.wikiRoot, cfg, log,
+        // 投递：把刚蒸馏出来的页面推进**正在进行的那一轮**
+        onStaged: target ? (page) => deliverToCurrentTurn(target, page, log) : null,
+      })
+      consumed = summary.considered > 0
       if (summary.considered > 0) log('background acquisition (' + why + '):', JSON.stringify({ considered: summary.considered, staged: summary.staged, skipped: summary.skipped, errors: summary.errors }))
     } catch (e) {
       log('background acquisition failed (non-fatal):', e?.message ?? e)
     } finally {
+      // 一次都没处理到东西，就把 agent 还回去 —— 否则"空跑一次"会把它吃掉，
+      // 紧接着那次真正处理 gap 的补料就拿不到投递目标了（实测踩到）。
+      if (!consumed && target) strugglingAgent = target
       acquiring = false
+      if (rerunAfterAcquire) {
+        rerunAfterAcquire = false
+        log('acquire: 补跑一次（期间有新的挣扎登记）')
+        setTimeout(() => { void acquireNow('rerun') }, 0)
+      }
     }
   }
   // 轮次边界是「持久 session/event」，不是可 ctx.on 的 live 事件。
