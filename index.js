@@ -14,7 +14,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { createUserMessage as hostCreateUserMessage } from '@deepseek-ai/dsh-llm'
 import { loadConfig, DEFAULTS } from './lib/config.js'
 import { loadPages, ensureRepo } from './lib/wiki.js'
-import { buildCorpus, scoreQuery, triage, recallable } from './lib/recall.js'
+import { buildCorpus, scoreQuery, triage, recallable, looksLikeGap } from './lib/recall.js'
 import { appendGap, runAcquisition } from './lib/acquire.js'
 import { createLlm } from './lib/llm.js'
 import { registerTools } from './lib/tools.js'
@@ -135,7 +135,7 @@ export function apply(ctx, pluginConfig = {}) {
       if (t.bucket === 'miss') {
         // 旋钮 B2：只入队，绝不在此处阻塞去联网。
         // 但寒暄类短输入不是知识缺口，记进去只会污染队列并触发无意义联网。
-        if (cfg.autoAcquire && query.length >= cfg.minGapQueryChars) {
+        if (cfg.autoAcquire && looksLikeGap(query, { minChars: cfg.minGapQueryChars })) {
           await appendGap(cfg.wikiRoot, { query, score: t.best, sessionId: agent?.id })
           log('gap recorded, bucket=miss score=' + t.best)
         }
