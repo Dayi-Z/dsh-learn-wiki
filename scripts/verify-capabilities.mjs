@@ -115,5 +115,46 @@ let offThrew = false
 try { offMgr.applyTo(agentOff) } catch { offThrew = true }
 check('enabled=false 时不调用 restrict 且不抛', offThrew === false)
 
+// ── schemas(agent) vs schemas()（实测踩到的 API 误用）──
+// ctx.tools.schemas(agent) 是 agent 可见集（72）；无参调用是全局集（46，更小）。
+// 我一开始没传 agent，于是 workflow/ralph 被判为"未注册"滤掉，能力包静默 no-op。
+console.log('\n=== schemas(agent) vs schemas() ===')
+const FULL = [{ name: 'read' }, { name: 'workflow' }, { name: 'ralph' }]
+const GLOBAL_ONLY = [{ name: 'read' }]          // 无参时的更小子集
+const calls3 = []
+const ctx3 = { tools: { schemas: (a) => (a ? FULL : GLOBAL_ONLY) } }
+const agent3 = { ctx: { tools: { restrict: (f) => { calls3.push(f); return () => {} } } } }
+const mgr3 = createCapabilityManager({ ctx: ctx3, getCfg: () => cfg, log: () => {} })
+mgr3.applyTo(agent3)
+check('传 agent 时拿到完整目录并装配',
+  JSON.stringify(calls3[0]) === '{"deny":["workflow","ralph"]}', JSON.stringify(calls3[0]))
+
+// ── dispose 重算陷阱 ──
+// 重算时被 deny 的工具已不在可见集里。若当成"缺失"丢掉，
+// 旧掩码 dispose 后它们会恢复可见 —— "放宽"会意外变成"放行"。
+console.log('\n=== 重算不得丢掉已 deny 的工具 ===')
+let visible = new Set(['read', 'workflow', 'ralph'])
+const calls4 = []
+const ctx4 = { tools: { schemas: () => [...visible].map(n => ({ name: n })) } }
+const agent4 = {
+  ctx: {
+    tools: {
+      restrict: (f) => {
+        calls4.push(f)
+        for (const n of f.deny ?? []) visible.delete(n)          // 掩码真实生效
+        return () => { for (const n of f.deny ?? []) visible.add(n) }  // dispose 会恢复
+      },
+    },
+  },
+}
+const mgr4 = createCapabilityManager({ ctx: ctx4, getCfg: () => cfg, log: () => {} })
+mgr4.applyTo(agent4)
+check('首次装配裁掉两个', JSON.stringify(calls4[0]) === '{"deny":["workflow","ralph"]}', JSON.stringify(calls4[0]))
+check('装配后掩码生效（可见集变小）', visible.size === 1, [...visible].join(','))
+
+mgr4.applyTo(agent4)   // 第二次装配：此刻可见集只剩 read
+check('重算时仍保留已 deny 的工具（不因不可见而丢弃）',
+  JSON.stringify(calls4[1]) === '{"deny":["workflow","ralph"]}', JSON.stringify(calls4[1]))
+
 console.log(failures === 0 ? '\nALL PASS — 能力包语义正确' : '\n' + failures + ' FAILURE(S)')
 process.exit(failures === 0 ? 0 : 1)
