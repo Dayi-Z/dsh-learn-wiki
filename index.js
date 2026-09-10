@@ -331,11 +331,16 @@ export function apply(ctx, pluginConfig = {}) {
     try {
       if (!(await repoExistsSafe(cfg.wikiRoot))) await ensureRepo(cfg.wikiRoot)
       const { pages } = await loadPages(cfg.wikiRoot)
-      const pool = recallable(pages, { minConfidence: cfg.minConfidence })
+      // 自动注入路径：跳过被隔离的页（嫌疑 >= N 且多于确认）
+      const usage = await loadUsage(cfg.wikiRoot)
+      const pool = recallable(pages, {
+        minConfidence: cfg.minConfidence,
+        usage: usage.pages,
+        policy: cfg.usagePolicy,
+      })
       if (pool.length === 0) return decision
       const corpus = buildCorpus(pool)
       // 排序 = 相似度 × 强化因子（无证据时因子为 1，阈值语义不变）
-      const usage = await loadUsage(cfg.wikiRoot)
       const hits = scoreQuery(corpus, query, { stats: usage.pages })
       const t = triage(hits, cfg)
       signal?.throwIfAborted?.()

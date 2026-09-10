@@ -3,8 +3,8 @@
 // 核心不变量：**无证据 = 中性（因子 1.0）**。
 // 如果新知识因为"还没被确认过"就被惩罚，冷启动永远起不来，
 // 整个系统会固化成只有旧知识能被召回。
-import { emptyUsage, recordHit, recordConfirmed, recordSuspect, reinforcementFactor, usageLabel } from '../lib/usage.js'
-import { buildCorpus, scoreQuery, triage } from '../lib/recall.js'
+import { emptyUsage, recordHit, recordConfirmed, recordSuspect, reinforcementFactor, usageLabel, classify, shouldQuarantine, DEFAULT_POLICY } from '../lib/usage.js'
+import { buildCorpus, scoreQuery, triage, recallable } from '../lib/recall.js'
 
 let failures = 0
 const check = (label, ok, detail = '') => {
@@ -82,6 +82,46 @@ check('★ 有嫌疑的页排到最后', withStats[withStats.length - 1].page.id
 check('★ 被确认的页排到第一', withStats[0].page.id === 'good', JSON.stringify(withStats.map(h => h.page.id + ':' + h.score)))
 check('分量被保留（便于诊断）', withStats[0].similarity !== undefined && withStats[0].factor !== undefined,
   JSON.stringify({ sim: withStats[0].similarity, factor: withStats[0].factor }))
+
+console.log('\n=== 分类：dead 必须看页龄 ===')
+const P = DEFAULT_POLICY
+const mk = (createdDaysAgo) => ({ created: new Date(NOW - createdDaysAgo * 86400000).toISOString() })
+check('零命中 + 昨天写的 -> new（不是 dead）',
+  classify({ hits: 0, confirmed: 0, suspect: 0 }, mk(1), { now: NOW, policy: P }) === 'new')
+check('零命中 + 30 天前写的 -> dead',
+  classify({ hits: 0, confirmed: 0, suspect: 0 }, mk(30), { now: NOW, policy: P }) === 'dead')
+check('零命中 + 不知道页龄 -> 不妄判为 dead',
+  classify({ hits: 0, confirmed: 0, suspect: 0 }, {}, { now: NOW, policy: P }) === 'unconfirmed')
+check('命中过 + 有确认 -> confirmed',
+  classify({ hits: 3, confirmed: 1, suspect: 0 }, mk(5), { now: NOW, policy: P }) === 'confirmed')
+check('命中过 + 无确认 -> unconfirmed',
+  classify({ hits: 3, confirmed: 0, suspect: 0 }, mk(5), { now: NOW, policy: P }) === 'unconfirmed')
+
+console.log('\n=== 分类：嫌疑阈值与确认的对抗 ===')
+check('1 次嫌疑 -> suspect-watch（还没到阈值）',
+  classify({ hits: 5, confirmed: 0, suspect: 1 }, mk(3), { now: NOW, policy: P }) === 'suspect-watch')
+check('3 次嫌疑 -> suspect',
+  classify({ hits: 5, confirmed: 0, suspect: 3 }, mk(3), { now: NOW, policy: P }) === 'suspect')
+check('★ 确认多于嫌疑时不隔离（嫌疑可能只是偶发）',
+  classify({ hits: 9, confirmed: 9, suspect: 3 }, mk(3), { now: NOW, policy: P }) !== 'suspect')
+
+console.log('\n=== 隔离：只掐自动路径 ===')
+check('嫌疑达阈值且多于确认 -> 隔离',
+  shouldQuarantine({ suspect: 3, confirmed: 0 }, P) === true)
+check('确认更多 -> 不隔离', shouldQuarantine({ suspect: 3, confirmed: 4 }, P) === false)
+check('无记录 -> 不隔离', shouldQuarantine(undefined, P) === false)
+
+const pagesQ = [
+  { id: 'q1', status: 'committed', confidence: 0.9, title: 'A', body: 'aaa', tags: [], category: 'fact', sources: ['x'] },
+  { id: 'ok', status: 'committed', confidence: 0.9, title: 'B', body: 'bbb', tags: [], category: 'fact', sources: ['x'] },
+]
+const usageQ = { pages: { q1: { hits: 5, confirmed: 0, suspect: 3 }, ok: { hits: 5, confirmed: 2, suspect: 0 } } }
+const autoPool = recallable(pagesQ, { usage: usageQ.pages })
+const explicitPool = recallable(pagesQ, { usage: usageQ.pages, includeQuarantined: true })
+check('★ 自动路径排除被隔离的页', !autoPool.some(p => p.id === 'q1') && autoPool.some(p => p.id === 'ok'),
+  JSON.stringify(autoPool.map(p => p.id)))
+check('★ 显式检索仍能看到被隔离的页', explicitPool.some(p => p.id === 'q1'),
+  JSON.stringify(explicitPool.map(p => p.id)))
 
 console.log(failures === 0 ? '\nALL PASS — 使用证据与强化因子正确' : '\n' + failures + ' FAILURE(S)')
 process.exit(failures === 0 ? 0 : 1)
