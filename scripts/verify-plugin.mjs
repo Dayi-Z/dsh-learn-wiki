@@ -68,8 +68,8 @@ catch (e) { check('apply(ctx) 执行成功', false, e.message) }
 
 // ── 工具 ──
 const names = registered.map(t => t.name).sort()
-check('注册了 4 个工具', registered.length === 4, names.join(', '))
-check('工具名符合预期', JSON.stringify(names) === JSON.stringify(['wiki_commit', 'wiki_learn', 'wiki_recall', 'wiki_review']), names.join(', '))
+check('注册了 5 个工具', registered.length === 5, names.join(', '))
+check('工具名符合预期', JSON.stringify(names) === JSON.stringify(['wiki_acquire', 'wiki_commit', 'wiki_learn', 'wiki_recall', 'wiki_review']), names.join(', '))
 check('每个工具都有 output 声明', registered.every(t => t.output && t.output.schema && typeof t.output.render === 'function'))
 check('每个工具都有 execute', registered.every(t => typeof t.execute === 'function'))
 
@@ -153,6 +153,7 @@ for (const r of [
   await callTool('wiki_review', {}),
   await callTool('wiki_learn', { title: '临时测试页', body: '内容', sources: 'https://e.com' }),
   await callTool('wiki_commit', { id: '根本不存在的页面' }),
+  await callTool('wiki_acquire', { dryRun: true }),
 ]) {
   check('输出合法: ' + r.label, r.ok, r.detail)
 }

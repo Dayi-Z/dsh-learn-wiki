@@ -17,6 +17,7 @@ import { loadPages, ensureRepo } from './lib/wiki.js'
 import { buildCorpus, scoreQuery, triage, recallable, looksLikeGap } from './lib/recall.js'
 import { appendGap, runAcquisition } from './lib/acquire.js'
 import { createLlm } from './lib/llm.js'
+import { createLogger } from './lib/log.js'
 import { registerTools } from './lib/tools.js'
 
 export const name = 'dsh-learn-wiki'
@@ -85,12 +86,13 @@ export function apply(ctx, pluginConfig = {}) {
   let acquiring = false
   let lastAcquire = 0
 
-  const log = (...a) => console.log('[dsh-learn-wiki]', ...a)
+  // 落盘日志：桌面版里插件 stdout 基本不可见，诊断只能靠文件
+  const log = createLogger(baseRoot)
 
   // ── 工具注册 ──
   ctx.effect(() => {
     // 传 getCfg 而不是快照：每次工具调用都重读配置，wiki.config.json 热生效
-    const dispose = registerTools(ctx, { getCfg })
+    const dispose = registerTools(ctx, { getCfg, llm })
     return () => { try { dispose() } catch { /* noop */ } }
   }, 'dsh-learn-wiki: tools')
 
