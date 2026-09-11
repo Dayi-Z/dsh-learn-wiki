@@ -49,6 +49,7 @@
     "verify:nonblocking": "node scripts/verify-nonblocking.mjs",
     "verify:isolation": "node scripts/verify-session-isolation.mjs",
     "verify:lint": "node scripts/verify-lint.mjs",
+    "verify:merge": "node scripts/verify-merge.mjs",
     "ui:probe": "node scripts/ui-probe.mjs",
     "ui:snapshot": "node scripts/ui-snapshot.mjs"
   },
