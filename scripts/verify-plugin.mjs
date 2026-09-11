@@ -5,12 +5,77 @@ import { rm, mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { readFile } from 'node:fs/promises'
 import { ensureRepo } from '../lib/wiki.js'
+import { DEFAULTS } from '../lib/config.js'
+
+// 触发 edit-churn 需要的次数**从配置读**，不写死。
+// 写死过一次：阈值从 4 调到 8 之后，下面所有造挣扎的循环都不够长了，
+// 于是六条断言一起变红——而它们红的原因和被测逻辑毫无关系。
+const CHURN = DEFAULTS.struggleEditChurn
+const IDENTICAL = DEFAULTS.struggleRepeatIdentical
 
 const ROOT = '.tmp-plugin-test'
 let failures = 0
 const check = (label, ok, detail = '') => {
   console.log((ok ? '  PASS  ' : '  FAIL  ') + label + (detail ? '  — ' + detail : ''))
   if (!ok) failures++
+}
+
+/**
+ * 有界轮询等**真实条件**，而不是写死 sleep。
+ *
+ * 为什么必须换：这几处等的是 fire-and-forget 的异步路径（appendGap 不阻塞回调、
+ * 补料 worker 在后台跑）。写死 300ms / 2500ms 单独跑够用，整套跑机器一忙就红，
+ * 而且每次红的是不同断言——看着像逻辑坏了，其实只是等得不够久。
+ * 轮询条件本身，所以不会掩盖真问题：真坏了会一直等到超时，然后如实报红。
+ */
+/**
+ * 制造一次 edit-churn。
+ *
+ * **参数必须每次都不同**：真实编辑的 old_string 从来不一样，而如果这里传完全相同的
+ * 参数，repeat-identical（阈值 5）会在第 5 次就命中，到 edit-churn 的阈值 8 时
+ * 两条信号会**同时**触发——测的就不再是 edit-churn 这一条路径了。
+ * 实测踩到：编辑链路的 suspect 断言因此在整套跑里时红时绿，查了半天才定位到这里。
+ */
+const churn = (observe, agent, file) => {
+  for (let i = 0; i < CHURN; i++) {
+    observe({ name: 'edit', arguments: { file_path: file, old_string: 'v' + i }, agent }, { isError: false })
+  }
+  // ★ 光"改得多"已经不再算卡住 —— edit-churn 现在要求窗口里有**失败证据**。
+  //   理由（实测）：43 条挣扎记录里 35 条是 edit-churn，全部来自正常迭代
+  //   （同一个 client.js 改了十几次、每次都跑通），产出的唯一一页还是错的。
+  //   "反复修改"是努力，"反复修改并且撞墙"才是死胡同。
+  //   这里补一次真实的命令失败 —— 形状照抄 DSH 的约定（非零退出写进结果正文），
+  //   而不是自己编一个 isError：编出来的形状恰恰是原来漏检的那一半。
+  observe({ name: 'pwsh', arguments: { command: 'npm test' }, agent }, {
+    isError: false,
+    content: [{ type: 'tool-result', content: [{ type: 'text', text: 'FAIL src/x.test.js\n[exit code: 1]' }], isError: false }],
+  })
+}
+
+/**
+ * 制造一次"撞同一堵墙"：同一错误签名反复出现。
+ *
+ * 这是**允许联网**的那一类信号 —— 它带着**错误文本**，而错误文本网上真的有人写过。
+ * edit-churn 已不在联网白名单里：它的症状查询里只有一个**本地文件名**
+ * （"反复修改 client.js 仍不成功"），这句话网上不存在，检索它最坏会撞上同名项目。
+ * 实测它沉淀出过一页关于另一个 llm-wiki 包的内容，只因为都在改 client.js。
+ */
+const sameWall = (observe, agent, tag, msg) => {
+  const RECUR = DEFAULTS.struggleRecurringError
+  const error = msg ?? ('Error: ' + tag + '_FAILURE at src/x.js:12')
+  for (let i = 0; i < RECUR; i++) {
+    observe({ name: 'pwsh', arguments: { command: 'check ' + tag + ' ' + i }, agent }, { isError: true, error: { message: error } })
+  }
+}
+
+async function waitFor(fn, ms = 20000, step = 100) {
+  const dl = Date.now() + ms
+  for (;;) {
+    let v = null
+    try { v = await fn() } catch { v = null }
+    if (v || Date.now() >= dl) return v
+    await new Promise(r => setTimeout(r, step))
+  }
 }
 
 await rm(ROOT, { recursive: true, force: true })
@@ -107,9 +172,12 @@ try { mod.apply(mockCtx, { wikiRoot: ROOT }); check('apply(ctx) 执行成功', t
 catch (e) { check('apply(ctx) 执行成功', false, e.message) }
 
 // ── 工具 ──
+// 精确相等是**故意**的：它同时卡住"少注册一个"（工具静默消失，模型忽然
+// 没有这个能力）和"多注册一个"（没想清楚就加工具，每个请求都多付 token）。
+// 代价是加工具时必须来这里改一次 —— 那正是我们希望被提醒的时刻。
 const names = registered.map(t => t.name).sort()
-check('注册了 7 个工具', registered.length === 7, names.join(', '))
-check('工具名符合预期', JSON.stringify(names) === JSON.stringify(['find_tools', 'wiki_acquire', 'wiki_commit', 'wiki_learn', 'wiki_recall', 'wiki_review', 'wiki_struggle']), names.join(', '))
+check('注册了 9 个工具', registered.length === 9, names.join(', '))
+check('工具名符合预期', JSON.stringify(names) === JSON.stringify(['find_tools', 'wiki_acquire', 'wiki_commit', 'wiki_harvest', 'wiki_learn', 'wiki_recall', 'wiki_review', 'wiki_sessions', 'wiki_struggle']), names.join(', '))
 check('每个工具都有 output 声明', registered.every(t => t.output && t.output.schema && typeof t.output.render === 'function'))
 check('每个工具都有 execute', registered.every(t => typeof t.execute === 'function'))
 
@@ -118,8 +186,14 @@ check('挂上 agent/pre-step', Array.isArray(handlers['agent/pre-step']) && hand
 check('订阅 session/event（轮次边界的正确来源）', Array.isArray(handlers['session/event']) && handlers['session/event'].length === 1)
 check('订阅 tools/result（挣扎检测）', Array.isArray(handlers['tools/result']) && handlers['tools/result'].length === 1)
 check('订阅 agent/created（能力包装配）', Array.isArray(handlers['agent/created']) && handlers['agent/created'].length === 1)
-check('注册了 UI 数据路由', registeredRoutes.some(r => r.path === '/learn-wiki/api/state'),
-  JSON.stringify(registeredRoutes.map(r => r.path)))
+// 匹配规则照抄宿主（dsh-host-webserver/lib/index.js:199）。
+// 尾斜杠写错时 kind/path 看着都对，但永远匹配不上，而症状是 HTTP 200 + index.html。
+const matchesPrefix = (prefix, pathname) => pathname === prefix || pathname.startsWith(prefix + '/')
+const uiRoute = registeredRoutes.find(r => r.kind === 'prefix')
+check('★ 注册了 UI 数据路由（prefix，覆盖全部四条 api 路径）',
+  !!uiRoute && ['/learn-wiki/api/state', '/learn-wiki/api/page', '/learn-wiki/api/commit', '/learn-wiki/api/capabilities']
+    .every(p => matchesPrefix(uiRoute.path, p)),
+  JSON.stringify(registeredRoutes.map(r => r.kind + ':' + r.path)))
 
 // 能力包必须真的能对 agent 装配掩码
 if (handlers['agent/created']?.[0]) {
@@ -144,7 +218,7 @@ if (handlers['tools/result']?.[0]) {
   const obs = handlers['tools/result'][0]
   const ag = {}
   const toolExec = { name: 'read', arguments: { file_path: 'x' }, agent: ag }
-  for (let i = 0; i < 5; i++) obs(toolExec, { isError: false })
+  for (let i = 0; i < IDENTICAL; i++) obs(toolExec, { isError: false })
   const { readStruggles } = await import('../lib/struggle.js')
   const recs = await readStruggles(ROOT)
   check('连续相同调用被记录进 struggle.jsonl', recs.length >= 1, 'records=' + recs.length)
@@ -153,18 +227,35 @@ if (handlers['tools/result']?.[0]) {
 
   // ★ 触发器换向：挣扎信号必须**自动登记一条症状 gap**
   // 这是整个改造的核心 —— 从"检索未命中"换成"卡住了"。
+  //
+  // ★ 2026-09-11 整改：**edit-churn 不再登记 gap**。
+  //   它的症状查询里只有一个本地文件名（"反复修改 client.js 仍不成功"），
+  //   这句话网上不存在；检索它最坏的结果是撞上同名项目 —— 实测它沉淀出过
+  //   一页关于**另一个叫 llm-wiki 的 npm 包**的内容，只因为都在改 client.js。
+  //   允许联网的信号现在由 cfg.gapTriggerSignals 决定，只留带**错误文本**的那些。
   const { readGaps } = await import('../lib/acquire.js')
+  const { drainLocks } = await import('../lib/lock.js')
   const baseGaps = (await readGaps(ROOT)).length
+
+  // 先证明第一半：改得多、但没撞同一堵墙 → 不登记 gap。
   const ag2 = {}
-  // 制造一个 edit-churn：同一文件改 4 次
-  for (let i = 0; i < 4; i++) obs({ name: 'edit', arguments: { file_path: 'D:/x/widget.js' }, agent: ag2 }, { isError: false })
-  // appendGap 是 fire-and-forget（不能阻塞工具结果回调），所以这里要等一下
-  await new Promise(r => setTimeout(r, 300))
+  churn(obs, ag2, 'D:/x/widget.js')
+  // drainLocks 比 sleep 轮询可靠：appendGap 的锁在 fire-and-forget 调用里
+  // **同步**登记的，所以把它排空之后，写盘一定已完成。
+  await drainLocks()
+  const afterChurn = await readGaps(ROOT)
+  check('★ edit-churn 不再登记 gap（它带的只是本地文件名，网上没有这句话）',
+    afterChurn.length === baseGaps, 'before=' + baseGaps + ' after=' + afterChurn.length)
+
+  // 再证明第二半：撞同一堵墙（recurring-error，带着错误文本）→ 登记。
+  const ag3 = {}
+  sameWall(obs, ag3, 'WIDGET', 'Error: WIDGET_OVERFLOW at src/widget.js:12')
+  await drainLocks()
   const afterGaps = await readGaps(ROOT)
-  check('★ 挣扎自动登记了 gap', afterGaps.length > baseGaps, 'before=' + baseGaps + ' after=' + afterGaps.length)
-  const widgetGap = afterGaps.find(g => String(g.query).includes('widget.js'))
-  check('★ 登记的是症状查询而非用户原话',
-    !!widgetGap && /反复修改/.test(String(widgetGap.query)) && !/ok|好的|继续/.test(String(widgetGap.query)),
+  check('★ 撞同一堵墙 → 自动登记了 gap', afterGaps.length > baseGaps, 'before=' + baseGaps + ' after=' + afterGaps.length)
+  const widgetGap = afterGaps.find(g => String(g.query).includes('WIDGET_OVERFLOW'))
+  check('★ 登记的是症状查询（带错误文本，可搜）而非用户原话',
+    !!widgetGap && !/ok|好的|继续/.test(String(widgetGap.query)),
     JSON.stringify(String(widgetGap?.query ?? '')))
 }
 check('未订阅不存在的 turn/end live 事件', handlers['turn/end'] === undefined)
@@ -198,9 +289,22 @@ if (handlers['tools/result']?.[0]) {
   }
   const um = { role: 'user', content: [{ type: 'text', text: 'Gadget 改动后不生效，帮我看看' }] }
   await preStep({ agent: agD, messages: [um], step: 1, signal: { throwIfAborted() {} } }, async () => ({ kind: 'enter', messages: [um] }))
-  for (let i = 0; i < 4; i++) handlers['tools/result'][0]({ name: 'edit', arguments: { file_path: 'D:/x/gadget.js' }, agent: agD }, { isError: false })
-  for (let i = 0; i < 40 && injected.length === 0; i++) await new Promise(r => setTimeout(r, 250))
+  // 用"撞同一堵墙"而不是 edit-churn 驱动：后者已经不再登记 gap，
+  // 用它驱动这条链路会让测试静默地什么都没测到（投递永远不发生）。
+  sameWall(handlers['tools/result'][0], agD, 'GADGET', 'Error: GADGET_CHURN at D:/x/gadget.js:12')
+  // 等的是后台补料 worker，真异步。整套跑时机器负载高，10 秒上限会偶发撞线。
+// 放宽到 40 秒：放宽的是耐心不是断言。
+const dl = Date.now() + 40000
+while (Date.now() < dl && injected.length === 0) await new Promise(r => setTimeout(r, 250))
 
+  if (injected.length === 0) {
+    // 失败必须能自证。光说"没投递"等于让下一个人重跑一遍才知道卡在哪一环。
+    try {
+      const q = await readGaps(ROOT)
+      const last = q.slice(-3).map(g => ({ s: g.status, q: String(g.query).slice(0, 40) }))
+      console.log('    诊断：等了 40s 仍无投递。gap 总数=' + q.length + ' 最近=' + JSON.stringify(last))
+    } catch (e) { console.log('    诊断：读 gap 队列也失败了 — ' + e.message) }
+  }
   check('★ 补料完成后投递回当前轮（agent.inject 被调用）', injected.length >= 1, 'injected=' + injected.length)
   const msgText = JSON.stringify(injected[0]?.content ?? '')
   check('★ 投递内容含找到的知识', msgText.includes('widget-churn-fix') || msgText.includes('Widget 反复修改'), msgText.slice(0, 160))
@@ -301,11 +405,7 @@ if (handlers['tools/result']?.[0]) {
   const wm = { role: 'user', content: [{ type: 'text', text: 'Widget 协议的分帧和魔数是什么' }] }
   const r1 = await preStep({ agent: agS, messages: [wm], step: 1, signal: { throwIfAborted() {} } }, async () => ({ kind: 'enter', messages: [wm] }))
   check('★ 同轮先发生了一次命中注入', r1.messages.length === 2, 'len=' + r1.messages.length)
-  // 紧接着在同一轮里挣扎（注入没能阻止它）
-  handlers['tools/result'][0]({ name: 'edit', arguments: { file_path: 'D:/x/widget.js' }, agent: agS }, { isError: false })
-  handlers['tools/result'][0]({ name: 'edit', arguments: { file_path: 'D:/x/widget.js' }, agent: agS }, { isError: false })
-  handlers['tools/result'][0]({ name: 'edit', arguments: { file_path: 'D:/x/widget.js' }, agent: agS }, { isError: false })
-  handlers['tools/result'][0]({ name: 'edit', arguments: { file_path: 'D:/x/widget.js' }, agent: agS }, { isError: false })
+  churn(handlers['tools/result'][0], agS, 'D:/x/widget.js')
   await new Promise(r => setTimeout(r, 600))
 }
 
@@ -324,29 +424,38 @@ if (handlers['tools/result']?.[0] && handlers['session/event']?.[0]) {
   const agA = { id: 'sess-deliver-a', inject: () => 'id', ctx: { tools: { restrict: () => () => {} } } }
   const mq = { role: 'user', content: [{ type: 'text', text: 'Alpha 改动不生效' }] }
   await preStep({ agent: agA, messages: [mq], step: 1, signal: { throwIfAborted() {} } }, async () => ({ kind: 'enter', messages: [mq] }))
-  for (let i = 0; i < 4; i++) obs({ name: 'edit', arguments: { file_path: 'D:/x/alpha.js' }, agent: agA }, { isError: false })
-  // 等补料 + 投递完成
-  await new Promise(r => setTimeout(r, 2500))
-  const ua1 = await loadUsage(ROOT_REF())
-  check('★ 投递被记成 hits', (ua1.pages['widget-churn-fix']?.hits ?? 0) > 0, JSON.stringify(ua1.pages['widget-churn-fix']))
+  // 先取基线再挣扎：命中计数是**按页**的全局值，不能只看 "> 0"。
+  const hitsBefore = (await loadUsage(ROOT_REF())).pages['widget-churn-fix']?.hits ?? 0
+  sameWall(obs, agA, 'ALPHA')
+  const ua1 = await waitFor(async () => {
+    const u = await loadUsage(ROOT_REF())
+    return (u.pages['widget-churn-fix']?.hits ?? 0) > hitsBefore ? u : null
+  }, 20000)
+  check('★ 投递被记成 hits', (ua1?.pages['widget-churn-fix']?.hits ?? 0) > hitsBefore, JSON.stringify(ua1?.pages['widget-churn-fix']))
   // 投递之后再挣扎一次
-  for (let i = 0; i < 4; i++) obs({ name: 'edit', arguments: { file_path: 'D:/x/beta.js' }, agent: agA }, { isError: false })
-  await new Promise(r => setTimeout(r, 800))
-  const ua2 = await loadUsage(ROOT_REF())
+  sameWall(obs, agA, 'BETA')
+  const ua2 = await waitFor(async () => {
+    const u = await loadUsage(ROOT_REF())
+    return (u.pages['widget-churn-fix']?.suspect ?? 0) > 0 ? u : null
+  }, 20000)
   check('★ 投递后仍挣扎 -> 记嫌疑（这条补料没帮上忙）',
-    (ua2.pages['widget-churn-fix']?.suspect ?? 0) > 0, JSON.stringify(ua2.pages['widget-churn-fix']))
+    (ua2?.pages['widget-churn-fix']?.suspect ?? 0) > 0,
+    JSON.stringify(ua2?.pages))
 
   // 场景 B：投递后没再挣扎，轮次结束 -> 弱确认
   const agB = { id: 'sess-deliver-b', inject: () => 'id', ctx: { tools: { restrict: () => () => {} } } }
   const mq2 = { role: 'user', content: [{ type: 'text', text: 'Gamma 改动不生效' }] }
   await preStep({ agent: agB, messages: [mq2], step: 1, signal: { throwIfAborted() {} } }, async () => ({ kind: 'enter', messages: [mq2] }))
-  for (let i = 0; i < 4; i++) obs({ name: 'edit', arguments: { file_path: 'D:/x/gamma.js' }, agent: agB }, { isError: false })
-  await new Promise(r => setTimeout(r, 2500))
-  const ub1 = await loadUsage(ROOT_REF())
-  const beforeB = ub1.pages['widget-churn-fix']?.confirmed ?? 0
+  const hitsBeforeB = (await loadUsage(ROOT_REF())).pages['widget-churn-fix']?.hits ?? 0
+  sameWall(obs, agB, 'GAMMA')
+  // 等**这一次**投递落地，而不是"命中数 > 0"（那可能来自上一个 agent）。
+  await waitFor(async () => ((await loadUsage(ROOT_REF())).pages['widget-churn-fix']?.hits ?? 0) > hitsBeforeB ? true : null, 20000)
+  const beforeB = (await loadUsage(ROOT_REF())).pages['widget-churn-fix']?.confirmed ?? 0
   handlers['session/event'][0]({ id: 'sess' }, { type: 'turn/end' })
-  await new Promise(r => setTimeout(r, 500))
-  const ub2 = await loadUsage(ROOT_REF())
+  const ub2 = await waitFor(async () => {
+    const u = await loadUsage(ROOT_REF())
+    return (u.pages['widget-churn-fix']?.confirmed ?? 0) > beforeB ? u : null
+  }, 15000)
   check('★ 投递后无新挣扎 -> 轮次结束记确认',
     (ub2.pages['widget-churn-fix']?.confirmed ?? 0) > beforeB,
     'before=' + beforeB + ' after=' + (ub2.pages['widget-churn-fix']?.confirmed ?? 0))
@@ -356,8 +465,10 @@ if (handlers['tools/result']?.[0] && handlers['session/event']?.[0]) {
   const agC = { id: 'sess-deliver-c', inject: () => 'id', ctx: { tools: { restrict: () => () => {} } } }
   const mq3 = { role: 'user', content: [{ type: 'text', text: 'Delta 改动不生效' }] }
   await preStep({ agent: agC, messages: [mq3], step: 1, signal: { throwIfAborted() {} } }, async () => ({ kind: 'enter', messages: [mq3] }))
-  for (let i = 0; i < 4; i++) obs({ name: 'edit', arguments: { file_path: 'D:/x/delta.js' }, agent: agC }, { isError: false })
-  await new Promise(r => setTimeout(r, 2500))   // 等投递完成
+  sameWall(obs, agC, 'DELTA')
+  // 等投递完成。这一处无法轮询出一个明确条件（紧接着就要把观察期调到极大），
+  // 所以给足余量——整套跑时机器负载高，2.5 秒会偶发不够。
+  await new Promise(r => setTimeout(r, 8000))
   // 关键：把观察期调大，让"刚投递就结束轮次"成为确定性的场景。
   // 否则等补料的那 2.5 秒本身就可能超过观察期，测试前提不成立（实测踩到）。
   await writeFile(join(ROOT, 'wiki.config.json'), JSON.stringify({
@@ -408,7 +519,7 @@ if (handlers['tools/result']?.[0] && handlers['session/event']?.[0]) {
   const wq = { role: 'user', content: [{ type: 'text', text: 'Widget 协议的分帧和魔数是什么' }] }
   const rw = await preStep({ agent: agW, messages: [wq], step: 1, signal: { throwIfAborted() {} } }, async () => ({ kind: 'enter', messages: [wq] }))
   const injectedWeak = rw.messages.length === 2
-  for (let i = 0; i < 4; i++) handlers['tools/result'][0]({ name: 'edit', arguments: { file_path: 'D:/x/weak.js' }, agent: agW }, { isError: false })
+  churn(handlers['tools/result'][0], agW, 'D:/x/weak.js')
   await new Promise(r => setTimeout(r, 600))
   const u2 = await loadUsage(ROOT)
   const wp = u2.pages['widget-protocol']
