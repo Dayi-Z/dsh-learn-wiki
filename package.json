@@ -41,7 +41,13 @@
     "node": ">=20"
   },
   "scripts": {
-    "verify": "node scripts/verify-core.mjs"
+    "verify": "node scripts/verify-core.mjs",
+    "verify:render": "node scripts/verify-render.mjs",
+    "verify:subagent-guard": "node scripts/verify-subagent-guard.mjs",
+    "verify:harvest": "node scripts/verify-harvest.mjs",
+    "verify:sessions": "node scripts/verify-sessions.mjs",
+    "ui:probe": "node scripts/ui-probe.mjs",
+    "ui:snapshot": "node scripts/ui-snapshot.mjs"
   },
   "dependencies": {
     "@deepseek-ai/dsh-llm": "0.1.0-rc.8",

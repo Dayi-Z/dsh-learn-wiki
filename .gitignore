@@ -1,3 +1,7 @@
 node_modules/
 *.log
 .tmp-*/
+
+# 离线预览产物（ui-snapshot.mjs / ui-probe.mjs 生成）。
+# 它们是可重建的派生物，而且会很大 —— 不进版本库。
+.snapshots/
