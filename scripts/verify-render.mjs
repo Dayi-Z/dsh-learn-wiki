@@ -58,7 +58,7 @@ check('导出测试接缝 __components / __logic',
   Object.keys(M.__components || {}).join(','))
 if (!M.__components || !M.__logic) { console.log('\n无法继续'); process.exit(1) }
 
-const { toolGroups, knowledgeView, KFILTERS, pendingTotal } = M.__logic
+const { toolGroups, toolRowsVisible, familyOpen, knowledgeView, KFILTERS, pendingTotal } = M.__logic
 
 // ── 1. 纯逻辑（不经 React） ──
 console.log('')
@@ -97,6 +97,50 @@ check('筛选：按名字搜不区分大小写',
   toolGroups(tools, 'HINDSIGHT_TOOL00', 'all').filter((g) => g.kind === 'row').length === 1)
 check('筛选：搜不到时没有行',
   toolGroups(tools, '绝不可能匹配的名字', 'all').filter((g) => g.kind === 'row').length === 0)
+
+// ── 折叠（72 行 ≈ 6 屏，收起来才看得全）──
+console.log('')
+console.log('── 族折叠 ──')
+{
+  const all = toolGroups(tools, '', 'all')
+  const allRows = all.filter(g => g.kind === 'row').length
+  const allGroups = all.filter(g => g.kind === 'group')
+
+  // ★ 默认全部收起。第一版让「核心」默认展开，量完才发现几乎没用：
+  //   核心族是最大的一族（44/72），展开它等于没折。
+  check('★ 默认全部收起（核心族占 44/72，展开它等于没折）',
+    allGroups.every(g => familyOpen(g.family, {}, false) === false),
+    JSON.stringify(allGroups.map(g => g.family + ':' + familyOpen(g.family, {}, false))))
+
+  const vis = toolRowsVisible(all, { collapsed: {}, forceOpen: false })
+  const visRows = vis.filter(g => g.kind === 'row').length
+  check('★ 收起后可见行数**为 0**（族标题还在，行全收）', visRows === 0,
+    visRows + ' / ' + allRows)
+  check('★ 族标题**一个都不能少**（收起的是行，不是族本身）',
+    vis.filter(g => g.kind === 'group').length === allGroups.length,
+    vis.filter(g => g.kind === 'group').length + ' vs ' + allGroups.length)
+
+  check('显式展开覆盖默认', familyOpen('web', { web: false }, false) === true)
+  check('显式收起覆盖默认', familyOpen('核心', { 核心: true }, false) === false)
+
+  // ★ 搜索/筛选时强制展开
+  const forced = toolRowsVisible(all, { collapsed: { 核心: true, web: true }, forceOpen: true })
+  check('★ 有搜索词/非默认筛选时一律展开（搜到了却看不见，比不搜更糟）',
+    forced.filter(g => g.kind === 'row').length === allRows,
+    forced.filter(g => g.kind === 'row').length + ' vs ' + allRows)
+
+  // ★ 折叠后标题必须自己把话说完整
+  check('★ 族标题带条数、token 合计、已裁计数（收起后它是唯一看得见的东西）',
+    allGroups.every(g => typeof g.n === 'number' && typeof g.tokens === 'number' && typeof g.denied === 'number'
+      && g.n > 0 && g.tokens > 0),
+    JSON.stringify(allGroups.map(g => g.family + ':' + g.n + '/' + g.tokens + '/' + g.denied)))
+  check('每族的 token 合计 = 该族成员之和',
+    allGroups.every(g => g.tokens === all.filter(r => r.kind === 'row' && (r.item.family || '核心') === g.family)
+      .reduce((s, r) => s + (r.item.approxTokens || 0), 0)),
+    '合计对不上就说明统计的是别的族')
+
+  // DOM 层的断言放在下面工具表渲染出来之后 —— toolHtml 在这里还没定义。
+}
 
 const pages = makePages(15)
 const view1 = knowledgeView(pages, 'all')
@@ -149,6 +193,9 @@ const C = M.__components
 for (const [label, Component, props] of [
   ['能力页签（工具段）', C.CapabilitiesTab, { state }],
   ['工具段', C.ToolsSection, { state }],
+  // 受控全展开：默认全收起会让下面"每行都有 checkbox"这类断言一行都渲染不出来。
+  // 这不是给测试开后门 —— 界面上有真的「全部展开 / 收起」按钮走同一条路径。
+  ['工具段（全展开）', C.ToolsSection, { state, forceOpen: true }],
   ['技能段', C.SkillsSection, { state }],
   ['知识页签', C.KnowledgeTab, { state }],
   ['补料页签', C.SupplyTab, { state }],
@@ -175,21 +222,54 @@ for (const [label, Component, props] of [
 const toolHtml = results['工具段'].html
 const expRows = toolGroups(tools, '', 'all').filter((g) => g.kind === 'row').length
 const expGroups = toolGroups(tools, '', 'all').filter((g) => g.kind === 'group').length
-check('工具表：渲染出的数据行数 = 纯函数算出的行数',
-  count(toolHtml, 'class="lw-tr"') === expRows,
-  'DOM ' + count(toolHtml, 'class="lw-tr"') + ' vs 期望 ' + expRows)
+// 折叠之后，"渲染出的行数"要和 toolRowsVisible 算出的**可见**行数一致，
+// 而不是和全部行数一致 —— 那两个数在默认状态下本来就不一样。
+const expVisible = toolRowsVisible(toolGroups(tools, '', 'all'), { collapsed: {}, forceOpen: false })
+  .filter((g) => g.kind === 'row').length
+check('工具表：渲染出的数据行数 = toolRowsVisible 算出的可见行数',
+  count(toolHtml, 'class="lw-tr"') === expVisible,
+  'DOM ' + count(toolHtml, 'class="lw-tr"') + ' vs 期望 ' + expVisible)
 check('工具表：渲染出的族标题数 = 分组数',
   count(toolHtml, 'class="lw-group"') === expGroups,
   'DOM ' + count(toolHtml, 'class="lw-group"') + ' vs 期望 ' + expGroups)
+// ── 折叠在 DOM 层的断言（放在这里因为 toolHtml 刚才是未定义的）──
+{
+  const all = toolGroups(tools, '', 'all')
+  const allGroups = all.filter(g => g.kind === 'group')
+  check('★ 族标题渲染成真 <button> 且带 aria-expanded（折叠控件用 div 是常见的偷懒）',
+    count(toolHtml, 'class="lw-groupbtn"') === allGroups.length
+    && count(toolHtml, 'aria-expanded="false"') >= allGroups.length,
+    'btn=' + count(toolHtml, 'class="lw-groupbtn"') + ' collapsed=' + count(toolHtml, 'aria-expanded="false"'))
+  check('★ 默认收起时一行工具都不渲染（族标题仍在）',
+    count(toolHtml, 'class="lw-tr"') === 0 && count(toolHtml, 'class="lw-group"') === allGroups.length,
+    'rows=' + count(toolHtml, 'class="lw-tr"') + ' groups=' + count(toolHtml, 'class="lw-group"'))
+  check('★ 收起时提示"显示 N 行"（否则人会以为工具少了）',
+    /收起中，显示 \d+ 行/.test(toolHtml), (toolHtml.match(/收起中[^<]*/) || ['(无)'])[0])
+  check('★ 收起时族标题仍报出条数与 token（否则收起等于什么都看不到）',
+    allGroups.every(g => toolHtml.includes('>' + g.family + '<') && toolHtml.includes('>' + g.n + ' 个<')),
+    '五族的条数都要在')
+}
+
 check('工具表：每个族名都出现在 HTML 里',
   ['核心', 'github', 'hindsight', 'web', 'wiki'].every((f) => toolHtml.includes('>' + f + '<')),
   ['核心', 'github', 'hindsight', 'web', 'wiki'].filter((f) => !toolHtml.includes('>' + f + '<')).join(',') || '全部命中')
 check('★ 工具表：族标题里的计数与纯函数一致（不是恒显示 1）',
   toolGroups(tools, '', 'all').filter((g) => g.kind === 'group')
-    .every((g) => toolHtml.includes('class="lw-group-n">' + g.n + '<')),
+    .every((g) => toolHtml.includes('class="lw-group-n">' + g.n + ' 个<')),
   JSON.stringify(toolGroups(tools, '', 'all').filter((g) => g.kind === 'group').map((g) => g.n)))
+
+// checkbox 那条断言要看**展开状态**下的渲染：默认全收起时一行都没有，
+// 拿它去断言"每行都有 checkbox"等于什么都没测。
+const toolOpenHtml = results['工具段（全展开）'].html
 check('工具表：每行都有键盘可达的 checkbox（带 aria-label）',
-  count(toolHtml, 'type="checkbox"') === expRows && count(toolHtml, 'aria-label="裁掉 ') + count(toolHtml, 'aria-label="放回 ') === expRows)
+  count(toolOpenHtml, 'type="checkbox"') === expRows
+  && count(toolOpenHtml, 'aria-label="裁掉 ') + count(toolOpenHtml, 'aria-label="放回 ') === expRows,
+  'checkbox=' + count(toolOpenHtml, 'type="checkbox"') + ' vs 期望 ' + expRows)
+check('★ 全展开时行数与纯函数一致（证明折叠只是"隐藏"，没有丢行）',
+  count(toolOpenHtml, 'class="lw-tr"') === expRows,
+  'DOM ' + count(toolOpenHtml, 'class="lw-tr"') + ' vs 期望 ' + expRows)
+check('有「全部展开 / 收起」按钮（默认全收起之后，想通览一遍的人需要一条路）',
+  toolHtml.includes('全部展开 / 收起'))
 
 // 行数对：知识表
 const knHtml = results['知识页签'].html

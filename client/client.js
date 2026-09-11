@@ -182,6 +182,13 @@ window.__ModuleLoader__.load({
       '.lw-group-name{font:var(--dsw-font-xxxs-strong-11,600 11px/16px system-ui,sans-serif);color:var(--lw-fg2);',
       'font-family:var(--ds-font-family-code,ui-monospace,Menlo,monospace)}',
       '.lw-group-n{margin-left:8px;font:var(--dsw-font-xxxs-11,11px/16px system-ui,sans-serif);color:var(--lw-fg4)}',
+      // 族标题是**真的按钮**：键盘可达、有 aria-expanded。
+      // 折叠控件用 div 是常见的偷懒，代价是键盘用户用不了。
+      '.lw-groupbtn{display:inline-flex;align-items:baseline;gap:2px;padding:2px 6px;margin:0 0 0 -6px;',
+      'border:0;border-radius:6px;background:none;color:inherit;cursor:pointer;font:inherit;text-align:left}',
+      '.lw-groupbtn:hover{background:var(--lw-hover)}',
+      '.lw-groupbtn:focus-visible{outline:2px solid var(--lw-brand);outline-offset:1px}',
+      '.lw-group-chev{flex:none;width:12px;color:var(--lw-fg3);font:var(--dsw-font-xxxs-11,11px/16px system-ui,sans-serif)}',
       // 展开控件：一个去掉了所有默认外观的 button。
       // 它必须**看得见焦点**——键盘用户靠它知道自己在哪一格上。
       '.lw-chevbtn{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;padding:0;',
@@ -470,9 +477,51 @@ window.__ModuleLoader__.load({
       for (var k = 0; k < sorted.length; k++) {
         var it = sorted[k]
         var fam = it.family || '核心'
-        if (fam !== cur) { cur = fam; out.push({ kind: 'group', family: fam, n: 0 }); gi = out.length - 1 }
+        if (fam !== cur) { cur = fam; out.push({ kind: 'group', family: fam, n: 0, tokens: 0, denied: 0 }); gi = out.length - 1 }
         out[gi].n++
+        // 折叠之后标题就是这一族**唯一**看得见的东西，所以它得自己把话说完：
+        // 几条、多少 token、裁掉几条。少了这些，收起来等于什么都不知道。
+        out[gi].tokens += Number(it.approxTokens) || 0
+        if (it.denied) out[gi].denied++
         out.push({ kind: 'row', item: it })
+      }
+      return out
+    }
+
+    /**
+     * 这一族现在是展开的吗？
+     *
+     * 默认**全部收起**。
+     *
+     * 一开始我让「核心」默认展开，量完才发现那个默认几乎没用：核心族是**最大**的
+     * 一族（44 / 72 个工具），展开它等于没折 —— 6 屏变成 3.5 屏。
+     * 收起全部之后一屏就能看全五族的条数与 token，要哪一族再点开。
+     *
+     * 收起不等于看不见：族标题自己带着（几个 / 多少 token / 裁掉几个），
+     * 所以"先看全局再展开"这条路是通的，而不是"先看到一片空白"。
+     */
+    function familyOpen(fam, collapsed, forceOpen) {
+      if (forceOpen) return true
+      if (collapsed && Object.prototype.hasOwnProperty.call(collapsed, fam)) return collapsed[fam] === false
+      return false
+    }
+
+    /**
+     * 折叠后实际要渲染的行。**纯函数** —— 折叠逻辑不经过 React 也能被穷举断言。
+     *
+     * forceOpen（有搜索词或非默认筛选）时**一律展开**：
+     * 搜到了却看不见，比不搜更糟 —— 人会以为"没有匹配"。
+     */
+    function toolRowsVisible(groups, opts) {
+      var collapsed = (opts && opts.collapsed) || {}
+      var forceOpen = !!(opts && opts.forceOpen)
+      var out = []
+      var cur = null
+      for (var i = 0; i < groups.length; i++) {
+        var g = groups[i]
+        if (g.kind === 'group') { cur = g.family; out.push(g); continue }
+        if (!familyOpen(cur, collapsed, forceOpen)) continue
+        out.push(g)
       }
       return out
     }
@@ -533,6 +582,10 @@ window.__ModuleLoader__.load({
 
     // ── 能力：工具 + 技能 ─────────────────────────────────────────────────
     function ToolsSection(props) {
+      // 折叠状态：族名 -> true 表示收起。用"记下被改过的那些"而不是记全部，
+      // 因为默认规则是"只展开核心"，那是个规则不是一张表。
+      var collapseState = useState({})
+      var collapse = collapseState[0], setCollapse = collapseState[1]
       var cap = props.state.capabilities || {}
       var catalog = cap.catalog || {}
       var items = catalog.items || []
@@ -621,6 +674,16 @@ window.__ModuleLoader__.load({
 
       var groups = useMemo(function () { return toolGroups(itemsEff, q, filter) }, [itemsEff, q, filter])
       var shownCount = groups.filter(function (g) { return g.kind === 'row' }).length
+      // 有搜索词或非默认筛选时一律展开：搜到了却看不见，比不搜更糟 ——
+      // 人会以为"没有匹配"，然后去改搜索词。
+      // props.forceOpen 是**受控口子**（离线渲染/截图/测试用），与 PendingBar / TriageTab
+      // 的受控模式同一套惯例。默认收起会让结构测试一行都渲染不出来。
+      var forceOpen = !!(props && props.forceOpen) || !!q || filter !== 'all'
+      var visibleGroups = useMemo(
+        function () { return toolRowsVisible(groups, { collapsed: collapse, forceOpen: forceOpen }) },
+        [groups, collapse, forceOpen],
+      )
+      var visibleRows = visibleGroups.filter(function (g) { return g.kind === 'row' }).length
 
       if (!catalog.capturedAt) {
         return h('div', { className: 'lw-sec' },
@@ -647,6 +710,25 @@ window.__ModuleLoader__.load({
           }),
           q ? h(Btn, { size: 'sm', onClick: function () { setQ('') } }, '清除') : null
         ),
+        // 全部展开 / 收起：默认全收起之后，想通览一遍的人需要一条路。
+        // 没有它，"我要看全部"就只剩逐个点开五族。
+        h('div', { className: 'lw-bar' },
+          h(Btn, {
+            size: 'sm',
+            onClick: function () {
+              setCollapse(function (c0) {
+                var anyClosed = groups.some(function (g) {
+                  return g.kind === 'group' && !familyOpen(g.family, c0, false)
+                })
+                var n = Object.assign({}, c0)
+                for (var i = 0; i < groups.length; i++) {
+                  if (groups[i].kind === 'group') n[groups[i].family] = anyClosed ? false : true
+                }
+                return n
+              })
+            },
+          }, '全部展开 / 收起')
+        ),
         // 用筛选器表达"我只看裁掉的"，而不是把裁掉的挪到最前面。
         // 位置一旦会动，你就再也点不准第二下了。
         h('div', { className: 'lw-bar' },
@@ -657,7 +739,8 @@ window.__ModuleLoader__.load({
               onClick: function () { setFilter(pair[0]) },
             }, pair[1])
           }),
-          h('span', { className: 'lw-sec-n', style: { marginLeft: 'auto' } }, num(shownCount) + ' 行')
+          h('span', { className: 'lw-sec-n', style: { marginLeft: 'auto' } },
+            num(shownCount) + ' 行' + (visibleRows < shownCount ? '（收起中，显示 ' + num(visibleRows) + ' 行）' : ''))
         ),
         msg ? h('div', { className: 'lw-msg ' + (msg.ok ? 'ok' : 'err') }, msg.text) : null,
         h('table', { className: 'lw-table' },
@@ -673,17 +756,35 @@ window.__ModuleLoader__.load({
           )),
           h('tbody', null,
             groups.length
-              ? groups.map(function (g, gi) {
+              ? visibleGroups.map(function (g, gi) {
                   if (g.kind === 'group') {
                     // 族提成组标题：说一次，而不是在每一行重复一遍。
                     // 顺带把那一列的宽度让给用途。
                     // 注意这里叫「族」不叫「来源」——DSH 的工具注册表不暴露归属插件
                     // （schemaOf 只投影 name/description/parameters），
                     // 命名族是从名字前缀推的，是事实但不是归属声明。
+                    var shut = !familyOpen(g.family, collapse, forceOpen)
                     return h('tr', { key: 'g' + gi, className: 'lw-group' },
                       h('td', { className: 'lw-td', colSpan: 3 },
-                        h('span', { className: 'lw-group-name' }, g.family),
-                        h('span', { className: 'lw-group-n' }, String(g.n))))
+                        h('button', {
+                          type: 'button',
+                          className: 'lw-groupbtn',
+                          'aria-expanded': shut ? 'false' : 'true',
+                          // 折叠不是装饰：72 行 ≈ 6 屏，收起来才看得全。
+                          title: shut ? '展开这一族' : '收起这一族',
+                          onClick: function () {
+                            setCollapse(function (c0) {
+                              var n = Object.assign({}, c0)
+                              n[g.family] = familyOpen(g.family, c0, false)   // 现在是开的 -> 收起
+                              return n
+                            })
+                          },
+                        },
+                          h('span', { className: 'lw-group-chev' }, shut ? '▸' : '▾'),
+                          h('span', { className: 'lw-group-name' }, g.family),
+                          h('span', { className: 'lw-group-n' }, g.n + ' 个'),
+                          h('span', { className: 'lw-group-n' }, tok(g.tokens)),
+                          g.denied ? h('span', { className: 'lw-group-n' }, '已裁 ' + g.denied) : null)))
                   }
                   var i = g.item
                   return h('tr', { key: i.name, className: 'lw-tr' },
@@ -1897,7 +1998,7 @@ window.__ModuleLoader__.load({
      * 纯逻辑也一并交出去：排序、分组、筛选不经过 React 就能被穷举断言。
      * 渲染测试只负责证明"这些结果能画出来且不崩"，两件事分开测。
      */
-    exports.__logic = { toolGroups, knowledgeView, KFILTERS, tabKeys, pendingTotal }
+    exports.__logic = { toolGroups, toolRowsVisible, familyOpen, knowledgeView, KFILTERS, tabKeys, pendingTotal }
 
     /**
      * 样式表原文。
