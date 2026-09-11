@@ -22,7 +22,10 @@ import { createLlm } from './lib/llm.js'
 import { createLogger } from './lib/log.js'
 import { createStruggleTracker, recordStruggle, symptomQuery, readStruggles } from './lib/struggle.js'
 import { createCapabilityManager, loadCatalogSnapshot } from './lib/capabilities.js'
-import { loadUsage, saveUsage, recordHit, recordConfirmed, recordSuspect, usageLabel, classify, shouldQuarantine, reinforcementFactor, DEFAULT_POLICY } from './lib/usage.js'
+// updateUsage 而不是 loadUsage+saveUsage：证据账的读-改-写必须整段串行，
+// 否则并发的记录会互相覆盖丢失（详见 lib/usage.js 与 lib/lock.js 的注释）。
+import { loadUsage, updateUsage, recordHit, recordConfirmed, recordSuspect, usageLabel, classify, shouldQuarantine, reinforcementFactor, DEFAULT_POLICY } from './lib/usage.js'
+import { createSkillInventory, scopeKeyOf } from './lib/skills.js'
 import { registerTools } from './lib/tools.js'
 
 export const name = 'dsh-learn-wiki'
@@ -42,6 +45,33 @@ function buildUserMessage(text, source) {
   }
   return { role: 'user', ...payload }
 }
+
+/**
+ * 委托深度 > 0 就是一个子代理。
+ *
+ * 判据照抄 @deepseek-ai/dsh-subagent 的 delegationDepthOf()：
+ *   max(agent.session.header.delegationDepth, agent.options.subagentDepth)
+ * 但不引那个包 —— 这两个都是 agent 对象上的普通属性，为一个判断加一条依赖
+ * 不划算（同 lib/skills.js 读 Symbol(dsh.scope) 的做法）。
+ *
+ * 实测（解出真实会话 header 对比）：
+ *   子代理： origin="subagent"  delegationDepth=1  parentSession=session-...
+ *   根会话： delegationDepth=0（无 origin、无 parentSession）
+ *
+ * 读不到就当 0。这个方向的误判是安全的：
+ *   把子代理当主代理 = 退回旧行为（已知的坏行为，但不会更坏）；
+ *   把主代理当子代理 = 主代理从此不再积累任何证据 —— 那才是真事故。
+ */
+function delegationDepth(agent) {
+  try {
+    const h = agent?.session?.header?.delegationDepth
+    const o = agent?.options?.subagentDepth
+    const hn = Number.isSafeInteger(h) && h > 0 ? h : 0
+    const on = Number.isSafeInteger(o) && o > 0 ? o : 0
+    return Math.max(hn, on)
+  } catch { return 0 }
+}
+function isSubagent(agent) { return delegationDepth(agent) > 0 }
 
 const HINDSIGHT_MARK = '<hindsight_knowledge>'
 /**
@@ -189,11 +219,23 @@ export function apply(ctx, pluginConfig = {}) {
   const llm = createLlm(ctx, { provider: pluginConfig?.llmProvider, model: pluginConfig?.llmModel })
   const tracker = createStruggleTracker(liveCfg)
   const caps = createCapabilityManager({ ctx, getCfg: () => liveCfg, log: (...a) => log(...a), wikiRoot: baseRoot })
+  // 技能盘点：只读，带 TTL 缓存。刻意不进 inject —— 拿不到就如实说不可用。
+  // 技能 provider 挂在 agent preset 的作用域层，不带 scope 查只能看到空的全局层。
+  // 这里保存最近一次见过的 agent 作用域键，供 UI 路由（没有 agent 上下文）使用。
+  let lastAgentScope
+  const skills = createSkillInventory({ ctx, log: (...a) => log(...a), getScope: () => lastAgentScope })
 
   // 每会话的注入去重（KV cache 友好）：内容不变则不再重复注入
   const injectedDigest = new WeakMap()
   // agent -> 最近一次用户查询。挣扎时用它给症状查询补一点任务上下文。
   const lastQuery = new WeakMap()
+  /** 记住 agent 的作用域键：UI 路由不在任何 agent 作用域里，只能借用最近一个。 */
+  const noteAgentScope = (agent) => {
+    try {
+      const k = scopeKeyOf(agent)
+      if (k !== undefined) lastAgentScope = k
+    } catch { /* 取不到就退化成不带 scope 的查询 */ }
+  }
   // 后台补料互斥 + 冷却
   let acquiring = false
   let lastAcquire = 0
@@ -251,10 +293,33 @@ export function apply(ctx, pluginConfig = {}) {
           res.end(body)
         }
         const url = new URL(req.url, 'http://127.0.0.1')
+        // 读请求体。
+        //
+        // ★ 桌面端（app://）的 req 是 fetch Request 的**垫片**，它的 on() 只处理
+        //   close / aborted，对 'data' 和 'end' **静默返回**——body 只能靠异步迭代读
+        //   （dsh-host-desktop-carrier/lib/index.js:272）。
+        //   所以只挂 'data'/'end' 的话，这个 Promise 永远不 resolve，
+        //   handler 一直挂着，前端收到的是 "Failed to fetch"（请求根本没拿到响应）。
+        //   实测踩到：点任意一个工具前的方框就报保存失败。
+        //
+        //   node:http 的 IncomingMessage 同样可异步迭代，所以优先走迭代这条路，
+        //   两条载体都覆盖；真到了不支持迭代的实现再退回事件。
         const readBody = () => new Promise((resolve) => {
           let b = ''
-          req.on('data', (c) => { b += c; if (b.length > 1e6) req.destroy() })
-          req.on('end', () => { try { resolve(JSON.parse(b || '{}')) } catch { resolve(null) } })
+          const finish = () => { try { resolve(JSON.parse(b || '{}')) } catch { resolve(null) } }
+          const take = (c) => {
+            b += typeof c === 'string' ? c : Buffer.from(c).toString('utf8')
+            if (b.length > 1e6) { try { req.destroy() } catch {} }
+          }
+          if (typeof req[Symbol.asyncIterator] === 'function') {
+            void (async () => {
+              try { for await (const c of req) take(c) } catch { /* 读失败按空体处理 */ }
+              finish()
+            })()
+            return
+          }
+          req.on('data', take)
+          req.on('end', finish)
           req.on('error', () => resolve(null))
         })
 
@@ -298,6 +363,35 @@ export function apply(ctx, pluginConfig = {}) {
           return
         }
 
+        // ── 读路径 3：单页正文 ──
+        // 列表刻意不带正文：八页正文几十 KB，每次轮询都传一遍是浪费。
+        // 展开某一行时才按 id 取一次——这是"行是活的、列是死的"能成立的前提。
+        if (url.pathname === '/learn-wiki/api/page' && req.method === 'GET') {
+          const id = url.searchParams.get('id') || ''
+          if (!id) { send(400, { ok: false, error: '需要 ?id=' }); return }
+          const { pages } = await loadPages(cfg.wikiRoot)
+          const page = pages.find(p => p.id === id)
+          if (!page) { send(404, { ok: false, error: '找不到页面: ' + id }); return }
+          const usage = await loadUsage(cfg.wikiRoot)
+          const st = usage.pages[page.id]
+          send(200, {
+            ok: true,
+            id: page.id,
+            title: page.title ?? '',
+            category: page.category ?? '',
+            status: page.status ?? '',
+            confidence: typeof page.confidence === 'number' ? page.confidence : null,
+            created: page.created ?? null,
+            updated: page.updated ?? null,
+            tags: Array.isArray(page.tags) ? page.tags : [],
+            sources: Array.isArray(page.sources) ? page.sources : [],
+            body: String(page.body ?? ''),
+            blockers: commitReadiness(page).blockers ?? [],
+            usage: { hits: st?.hits ?? 0, confirmed: st?.confirmed ?? 0, suspect: st?.suspect ?? 0 },
+          })
+          return
+        }
+
         if (url.pathname !== '/learn-wiki/api/state') { send(404, { ok: false, error: 'not found' }); return }
 
         const { pages } = await loadPages(cfg.wikiRoot)
@@ -309,16 +403,21 @@ export function apply(ctx, pluginConfig = {}) {
           const st = usage.pages[p.id]
           return {
             id: p.id, title: p.title, category: p.category, confidence: p.confidence,
-            created: p.created, sources: (p.sources ?? []).length,
+            created: p.created ?? null,
+            updated: p.updated ?? p.created ?? null,
+            sources: (p.sources ?? []).length,
             cls: classify(st, p, { now, policy }),
             hits: st?.hits ?? 0, confirmed: st?.confirmed ?? 0, suspect: st?.suspect ?? 0,
             factor: Number(reinforcementFactor(st, now).toFixed(3)),
             quarantined: shouldQuarantine(st, policy),
           }
         })
+        // staged 带上 blockers：不然 UI 只能显示一个"不能提交"的灰按钮，
+        // 用户得自己去猜差什么。差什么就写什么。
         const staged = pages.filter(p => p.status === 'staged').map(p => ({
           id: p.id, title: p.title, category: p.category, confidence: p.confidence,
           sources: (p.sources ?? []).length,
+          blockers: commitReadiness(p).blockers ?? [],
         }))
         const counts = {}
         for (const p of committed) counts[p.cls] = (counts[p.cls] ?? 0) + 1
@@ -329,6 +428,24 @@ export function apply(ctx, pluginConfig = {}) {
         const struggles = await readStruggles(cfg.wikiRoot, 200)
         const sigCounts = {}
         for (const r of struggles) for (const s of (r.signals ?? [])) sigCounts[s.type] = (sigCounts[s.type] ?? 0) + 1
+        // 子代理的挣扎单独数一份。它们照记（观测要诚实），但**不产生后果** ——
+        // 界面上必须能看出"这 N 条不代表项目知识不够用"。
+        // 旧记录没有 origin 字段（守卫是后加的），一律算主代理，不倒推。
+        const subagentStruggles = struggles.filter(r => r.origin === 'subagent').length
+
+        // 能力包：把"看得见的成本"和"裁掉的成本"分开报。
+        // UI 只拿这两个数和总数，不做四则运算——省得有一天两边口径不一致还要人去对账。
+        const configuredDeny = [
+          ...(cfg.capabilities?.explicitOnly ?? []),
+          ...(cfg.capabilities?.diagnostics ?? []),
+          ...(cfg.capabilities?.deny ?? []),
+        ]
+        const catalog = caps.catalogSnapshot?.(
+          configuredDeny,
+          // 内存里没有就回退到磁盘快照 —— 否则重启后 UI 会显示"尚未捕获"
+          await loadCatalogSnapshot(cfg.wikiRoot),
+        ) ?? { items: [], total: 0, capturedAt: false }
+        const kept = catalog.items.filter(i => !i.denied)
 
         send(200, {
           ok: true,
@@ -336,27 +453,51 @@ export function apply(ctx, pluginConfig = {}) {
           app: { wikiRoot: cfg.wikiRoot, version: '0.1.0' },
           capabilities: {
             enabled: cfg.capabilities?.enabled === true,
-            configuredDeny: [
-              ...(cfg.capabilities?.explicitOnly ?? []),
-              ...(cfg.capabilities?.diagnostics ?? []),
-              ...(cfg.capabilities?.deny ?? []),
-            ],
-            catalog: caps.catalogSnapshot?.(
-              [...(cfg.capabilities?.explicitOnly ?? []), ...(cfg.capabilities?.diagnostics ?? []), ...(cfg.capabilities?.deny ?? [])],
-              // 内存里没有就回退到磁盘快照 —— 否则重启后 UI 会显示"尚未捕获"
-              await loadCatalogSnapshot(cfg.wikiRoot),
-            ) ?? { items: [], total: 0, capturedAt: false },
+            configuredDeny,
+            catalog,
+            totals: {
+              total: catalog.items.length,
+              kept: kept.length,
+              denied: catalog.items.length - kept.length,
+              keptTokens: kept.reduce((n, i) => n + (i.approxTokens ?? 0), 0),
+              deniedTokens: catalog.items.reduce((n, i) => (i.denied ? n + (i.approxTokens ?? 0) : n), 0),
+            },
           },
+          skills: await skills.snapshot(),
           knowledge: { committed, staged, counts, threshold: { hit: cfg.hitThreshold, weak: cfg.weakThreshold } },
           gaps: { counts: gapCounts, total: gaps.length, recent: gaps.slice(-12).map(g => ({ query: String(g.query).slice(0, 90), status: g.status })) },
-          struggles: { total: struggles.length, counts: sigCounts, recent: struggles.slice(-8).map(r => ({ ts: r.ts, signals: (r.signals ?? []).map(s => s.type) })) },
+          struggles: {
+            total: struggles.length,
+            counts: sigCounts,
+            subagent: subagentStruggles,
+            recent: struggles.slice(-8).map(r => ({
+              ts: r.ts,
+              signals: (r.signals ?? []).map(s => s.type),
+              origin: r.origin ?? 'agent',
+            })),
+          },
         })
       } catch (e) {
         try { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ ok: false, error: String(e?.message ?? e) })) } catch {}
       }
     }
-    const dispose = ctx.webServer.register({ kind: 'exact', path: '/learn-wiki/api/state', handler })
-    log('ui: /learn-wiki/api/state 已注册')
+    // 必须用 prefix，不能用 exact。
+    //
+    // 一个 handler 要服务四条路径：/api/state、/api/page、/api/commit、/api/capabilities。
+    // exact 只会把 /api/state 放进来，其余路径**根本到不了这个 handler**，
+    // 前端于是收到宿主自己的 404（HTML），JSON.parse 直接炸成
+    // 「Unexpected token '<' ... is not valid JSON」。
+    // 实测踩到了：单页接口在界面上永远显示"读不到正文"。
+    // 而当时的测试是直接调 route.handler 的，绕过了路由匹配，所以测不出来。
+    //
+    // path **不能带尾斜杠**。宿主（dsh-host-webserver/lib/index.js:199）的匹配是：
+    //     if (pathname !== prefix && !pathname.startsWith(prefix + '/')) continue
+    // 也就是它拿 prefix 和 prefix+'/' 两种形态去比。写成 '/learn-wiki/' 之后
+    // 它会去找 '/learn-wiki//api/state'——永远不匹配，请求落到 SPA 兜底路由，
+    // 前端拿到 index.html（**HTTP 200**，content-type: text/html）。
+    // 这个比 404 更难查：状态码是成功的。
+    const dispose = ctx.webServer.register({ kind: 'prefix', path: '/learn-wiki', handler })
+    log('ui: /learn-wiki 已注册（prefix，覆盖 api/state|page|commit|capabilities）')
     return () => { try { dispose() } catch {} }
   }, 'dsh-learn-wiki: ui route')
 
@@ -364,6 +505,7 @@ export function apply(ctx, pluginConfig = {}) {
   // agent/created 在作用域 setup 之后、驱动器启动之前触发，
   // 所以掩码能赶上第一次提示词组装。每个 agent 只装一次。
   ctx.on('agent/created', ({ agent }) => {
+    noteAgentScope(agent)
     try { caps.ensure(agent) } catch (e) { log('capabilities hook failed (non-fatal):', e?.message ?? e) }
   })
 
@@ -383,16 +525,36 @@ export function apply(ctx, pluginConfig = {}) {
       if (fired.length === 0) return
       log('struggle: ' + fired.map(f => f.type + '×' + f.count).join(', ') + '  (' + (fired[0].detail ?? '') + ')')
 
+      // ★ 子代理的挣扎**不是**关于我们知识的证据。
+      //
+      // 实测踩到（2026-09-11）：派出去做调研的子代理因为不知道"工具只能从
+      // run_code 里调"，连续 5 次调 read 失败 -> 触发 repeat-failure ->
+      // 插件把它的**任务提示词**当成知识缺口写进共享 gap 队列并联网搜索，
+      // 还把子代理会话 id 记了进去。同一批里另一条 gap 最终沉淀出了一页
+      // 关于**完全另一个撞名项目**的内容。
+      //
+      // 结构性原因：子代理是临时工。它的挣扎多半来自我们给它的提示词写得
+      // 不好、或者任务本身超出它拿到的上下文 —— 这两者都不该记到项目知识
+      // 的账上。拿子代理的挣扎去降权一条好知识，等于让临时工给正式员工
+      // 打绩效。
+      //
+      // 所以：子代理的挣扎**照记**（观测数据要诚实，也要能量化这个现象的
+      // 规模），但**不产生任何后果** —— 不记嫌疑、不进 gap 队列、不触发联网。
+      const sub = isSubagent(agent)
+
       // ★ 投递路径：投递之后**仍然**挣扎 -> 这条补料没帮上忙。
       // 这是最有价值也最贵的一类证据 —— 补料是花钱搜来的，而且比 L1 召回更主动。
       const pend = agent.id ? pendingDeliveries.get(agent.id) : null
       if (pend && pend.size > 0) {
         pendingDeliveries.delete(agent.id)
         const ids = [...pend.keys()]
-        void loadUsage(liveCfg.wikiRoot)
-          .then(u => { recordSuspect(u, ids); return saveUsage(liveCfg.wikiRoot, u) })
-          .then(() => log('usage: 投递后仍挣扎，记嫌疑 ' + ids.join(',')))
-          .catch((e) => log('usage suspect(deliver) failed (non-fatal):', e?.message ?? e))
+        if (sub) {
+          log('usage: 子代理投递后仍挣扎，不记嫌疑（仅记录）: ' + ids.join(','))
+        } else {
+          void updateUsage(liveCfg.wikiRoot, u => recordSuspect(u, ids))
+            .then(() => log('usage: 投递后仍挣扎，记嫌疑 ' + ids.join(',')))
+            .catch((e) => log('usage suspect(deliver) failed (non-fatal):', e?.message ?? e))
+        }
       }
 
       // ★ 最有价值的一类证据：这一轮的注入**没能阻止**挣扎。
@@ -400,10 +562,13 @@ export function apply(ctx, pluginConfig = {}) {
       const inj = agent.id ? turnInjections.get(agent.id) : null
       if (inj && !inj.struggled && inj.pages.size > 0) {
         inj.struggled = true
-        void loadUsage(liveCfg.wikiRoot)
-          .then(u => { recordSuspect(u, [...inj.pages]); return saveUsage(liveCfg.wikiRoot, u) })
-          .then(() => log('usage: 记为嫌疑 ' + [...inj.pages].join(',')))
-          .catch((e) => log('usage suspect failed (non-fatal):', e?.message ?? e))
+        if (sub) {
+          log('usage: 子代理挣扎，不记嫌疑（保留原级）: ' + [...inj.pages].join(','))
+        } else {
+          void updateUsage(liveCfg.wikiRoot, u => recordSuspect(u, [...inj.pages]))
+            .then(() => log('usage: 记为嫌疑 ' + [...inj.pages].join(',')))
+            .catch((e) => log('usage suspect failed (non-fatal):', e?.message ?? e))
+        }
       } else if (agent.id && !inj) {
         // 没注入过就没得判 —— 不要伪造证据
       }
@@ -412,20 +577,46 @@ export function apply(ctx, pluginConfig = {}) {
         sessionId: agent.id ?? '',   // 必须是字符串：undefined 会让工具输出非 lossless JSON
         mode: liveCfg.struggleMode,
         signals: fired,
+        // ★ 来源必须标出来。不标的话，子代理的记录和主代理的记录在界面上
+        //   长得一模一样，而两者的含义完全不同 —— 一个说明"项目知识不够用"，
+        //   另一个只说明"我派活的提示词没写好"。
+        origin: sub ? 'subagent' : 'agent',
+        depth: delegationDepth(agent),
       })
-      if (liveCfg.struggleMode === 'active'
-          && (liveCfg.gapTrigger === 'struggle' || liveCfg.gapTrigger === 'both')) {
-        // 把挣扎翻译成**症状查询**再登记 —— 不是用户的原话。
-        // 原话是意图（"ok 按你的倾向来"），搜索引擎只能给出噪声；
-        // 症状（报错文本、改不动的文件、反复失败的工具）才是网上真有人写过的。
-        const q = symptomQuery(fired, lastQuery.get(agent) ?? '')
-        if (q && q.length >= 6) {
-          log('struggle -> gap: ' + q.slice(0, 90))
-          // 记住是哪个 agent 卡住了 —— 补料完成后要把结果投递回**它**的这一轮
-          strugglingAgent = agent
-          void appendGap(liveCfg.wikiRoot, { query: q, score: 0, sessionId: agent.id ?? '' })
-            .then(() => scheduleAcquire())   // 立刻推一次，不等轮次结束
-            .catch((e) => log('struggle gap failed (non-fatal):', e?.message ?? e))
+      const gapWanted = liveCfg.struggleMode === 'active'
+        && (liveCfg.gapTrigger === 'struggle' || liveCfg.gapTrigger === 'both')
+      if (gapWanted && sub) {
+        // 明说跳过。这个项目的复发型故障是"静默 no-op"——一个悄悄不干活的
+        // 分支，比一个干错活的分支更难查。
+        log('struggle -> gap: 跳过（子代理，它的工具误用不是项目知识缺口）')
+      } else if (gapWanted) {
+        // ★ 只有"这个查询在网上存在"的信号才配去联网。
+        //
+        //   repeat-failure / recurring-error 带的是**错误文本**，可搜 ——
+        //     网上真的有人踩过同一堵墙并写下来。
+        //   edit-churn 带的只是一个**本地文件名**："反复修改 client.js 仍不成功"
+        //     这句话网上不存在。检索它最坏的结果是撞上同名项目 —— 实测它沉淀出过
+        //     一页关于**另一个叫 llm-wiki 的 npm 包**的内容，只因为都在改 client.js。
+        //
+        //   不适用的信号仍然**照常记录**（观测要诚实），只是不产生 gap。
+        const usable = fired.filter(s => (liveCfg.gapTriggerSignals ?? []).includes(s.type))
+        if (usable.length === 0) {
+          // 明说跳过。不留静默 no-op：这个分支以前会去联网搜一个网上不存在的字符串，
+          // 而"悄悄不干活"和"干错活"一样难查。
+          log('struggle -> gap: 跳过（' + fired.map(s => s.type).join(',') + ' 不适合联网检索）')
+        } else {
+          // 把挣扎翻译成**症状查询**再登记 —— 不是用户的原话。
+          // 原话是意图（"ok 按你的倾向来"），搜索引擎只能给出噪声；
+          // 症状（报错文本、反复失败的工具）才是网上真有人写过的。
+          const q = symptomQuery(usable, lastQuery.get(agent) ?? '')
+          if (q && q.length >= 6) {
+            log('struggle -> gap: ' + q.slice(0, 90))
+            // 记住是哪个 agent 卡住了 —— 补料完成后要把结果投递回**它**的这一轮
+            strugglingAgent = agent
+            void appendGap(liveCfg.wikiRoot, { query: q, score: 0, sessionId: agent.id ?? '' })
+              .then(() => scheduleAcquire())   // 立刻推一次，不等轮次结束
+              .catch((e) => log('struggle gap failed (non-fatal):', e?.message ?? e))
+          }
         }
       }
     } catch (e) {
@@ -465,6 +656,10 @@ export function apply(ctx, pluginConfig = {}) {
     // 兜底触发：即使 session/event 那条路因宿主版本差异失效，
     // 补料仍会在下一轮开始时被推动。acquiring 锁 + 冷却保证不会重复烧钱。
     scheduleAcquire()
+
+    // 记 agent 作用域。放在提前 return **之前**——短查询也要记，
+    // 否则用户连着发几条短消息时，UI 那边的作用域就会一直是旧的。
+    noteAgentScope(agent)
 
     const query = queryFrom(messages)
     if (!query || query.length < 4) return decision
@@ -516,8 +711,10 @@ export function apply(ctx, pluginConfig = {}) {
       // 一条被标为 weak 的页因为后续挣扎被判成"疑似有害"，
       // 那是错的归因。只有我们说过"可直接采信"的页，才为后续结果负责。
       const trustedIds = t.hit.map(h => h.page.id)
-      recordHit(usage, allInjected)
-      void saveUsage(cfg.wikiRoot, usage).catch(() => {})
+      // ★ 命中记录走原子更新，**不能**复用上面那份 usage 快照。
+      //   那份快照是几百毫秒前读的，只用来打分；拿它整体写回会抹掉这段时间里
+      //   别人（另一个 agent 的 pre-step、后台补料）刚记下的 suspect/confirm。
+      void updateUsage(cfg.wikiRoot, u => recordHit(u, allInjected)).catch(() => {})
       if (agent?.id) turnInjections.set(agent.id, { pages: new Set(trustedIds), struggled: false })
 
       log('inject bucket=' + t.bucket + ' best=' + t.best + ' hit=' + t.hit.length + ' weak=' + t.weak.length)
@@ -561,9 +758,7 @@ export function apply(ctx, pluginConfig = {}) {
           map.set(page.id, Date.now())
           pendingDeliveries.set(target.id, map)
           try {
-            const u = await loadUsage(liveCfg.wikiRoot)
-            recordHit(u, [page.id])
-            await saveUsage(liveCfg.wikiRoot, u)
+            await updateUsage(liveCfg.wikiRoot, u => recordHit(u, [page.id]))
           } catch (e) { log('usage hit(deliver) failed (non-fatal):', e?.message ?? e) }
         } : null,
       })
@@ -600,8 +795,7 @@ export function apply(ctx, pluginConfig = {}) {
           turnInjections.delete(agentId)
         }
         if (toConfirm.length > 0) {
-          void loadUsage(liveCfg.wikiRoot)
-            .then(u => { recordConfirmed(u, toConfirm); return saveUsage(liveCfg.wikiRoot, u) })
+          void updateUsage(liveCfg.wikiRoot, u => recordConfirmed(u, toConfirm))
             .then(() => log('usage: 记为确认 ' + toConfirm.join(',')))
             .catch((e) => log('usage confirm failed (non-fatal):', e?.message ?? e))
         }
@@ -621,8 +815,7 @@ export function apply(ctx, pluginConfig = {}) {
         pendingDeliveries.clear()
         if (tooEarly.length > 0) log('usage: 投递后观察期不足，不作判定 ' + tooEarly.join(','))
         if (okIds.length > 0) {
-          void loadUsage(liveCfg.wikiRoot)
-            .then(u => { recordConfirmed(u, okIds); return saveUsage(liveCfg.wikiRoot, u) })
+          void updateUsage(liveCfg.wikiRoot, u => recordConfirmed(u, okIds))
             .then(() => log('usage: 投递后无新挣扎，记确认 ' + okIds.join(',')))
             .catch((e) => log('usage confirm(deliver) failed (non-fatal):', e?.message ?? e))
         }
