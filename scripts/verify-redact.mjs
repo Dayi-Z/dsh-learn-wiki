@@ -1,7 +1,10 @@
 import { redact, looksSecret } from '../lib/redact.js'
 
 const cases = [
-  ['端点 https://opencode.ai/zen/v1 key：sk-hT4DqjCjxQDsbO4OP76saCIg0cVEwf5MlYJIUYboZQ3OPqeFUylD2NUFJtDh1nlT 我重新创建了', true],
+  // 合成样本，形状与真实泄漏一致但不含任何真密钥。
+  // 这里原本贴的是真实那一次泄漏的 key —— 测试要验的是**规则**，不是某一个具体的密钥，
+  // 把一个已泄漏的密钥留在仓库里只会让泄漏面变大。
+  ['端点 https://opencode.ai/zen/v1 key：sk-TESTONLY0000000000000000abcdefghijklmnopqrstuv 我重新创建了', true],
   ['Authorization: Bearer abcdefghijklmnopqrstuvwxyz123456', true],
   ['OPENCODE_API_KEY=sk-2abcdefghijklmnopqrstuvwxyz', true],
   ['ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', true],
@@ -19,7 +22,7 @@ for (const [t, want] of cases) {
 }
 
 // 脱敏后原文的密钥必须不残留
-const secret = 'sk-hT4DqjCjxQDsbO4OP76saCIg0cVEwf5MlYJIUYboZQ3OPqeFUylD2NUFJtDh1nlT'
+const secret = 'sk-TESTONLY0000000000000000abcdefghijklmnopqrstuv'
 const cleaned = redact('key：' + secret + ' 结束')
 const leaked = cleaned.includes(secret) || cleaned.includes(secret.slice(0, 30))
 console.log((leaked ? '  FAIL  ' : '  PASS  ') + '脱敏后原密钥不残留  — ' + cleaned)

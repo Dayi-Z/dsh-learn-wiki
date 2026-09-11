@@ -202,5 +202,31 @@ check('find_tools 仍能搜到被裁工具（用受限前缓存）', found5.some
 const lifted5 = mgr5.lift(agent5, ['workflow'])
 check('lift 报告已放宽', JSON.stringify(lifted5.lifted) === '["workflow"]', JSON.stringify(lifted5))
 
+// ── 族的归并：够多成员的前缀才算族 ──
+//
+// 实测踩到：按第一个词硬切，71 个工具切出 17 个单条族
+// （ask_/create_/get_/list_ 各成一门），比不分组更难读。
+// 规则是成员数 >= 3 才算族，其余归「核心」。
+console.log('\n=== 族的归并 ===')
+{
+  const persisted = [
+    { name: 'git_status', description: 'a' }, { name: 'git_diff', description: 'b' }, { name: 'git_push', description: 'c' },
+    { name: 'hindsight_recall', description: 'd' }, { name: 'hindsight_reflect', description: 'e' }, { name: 'hindsight_retain', description: 'f' },
+    { name: 'ask_user_question', description: 'g' },   // 单条 —— 不该成族
+    { name: 'create_goal', description: 'h' },        // 单条 —— 不该成族
+    { name: 'read', description: 'i' },               // 无前缀
+  ]
+  const m = createCapabilityManager({ ctx: { tools: { schemas: () => [] }, on: () => () => {}, effect: (f) => f(), inject: () => {} }, getCfg: () => ({ capabilities: { enabled: false } }), log: () => {} })
+  const cat = m.catalogSnapshot([], persisted)
+  const fam = Object.fromEntries(cat.items.map(i => [i.name, i.family]))
+  check('★ 成员够的前缀保留为族', fam.git_status === 'git' && fam.hindsight_recall === 'hindsight', JSON.stringify(fam))
+  check('★ 单条前缀并入「核心」，不再各立一门',
+    fam.ask_user_question === '核心' && fam.create_goal === '核心' && fam.read === '核心', JSON.stringify(fam))
+  check('每个工具都有族，且不是空串', cat.items.every(i => typeof i.family === 'string' && i.family.length > 0))
+  check('每个工具都带用途', cat.items.every(i => typeof i.purpose === 'string'), JSON.stringify(cat.items[0]))
+  const groupCount = new Set(cat.items.map(i => i.family)).size
+  check('★ 分组数远小于工具数（否则等于没分组）', groupCount <= 3, groupCount + ' 组 / ' + cat.items.length + ' 个工具')
+}
+
 console.log(failures === 0 ? '\nALL PASS — 能力包语义正确' : '\n' + failures + ' FAILURE(S)')
 process.exit(failures === 0 ? 0 : 1)
