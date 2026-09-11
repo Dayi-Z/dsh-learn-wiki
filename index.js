@@ -25,6 +25,7 @@ import { createLlm } from './lib/llm.js'
 import { createLogger } from './lib/log.js'
 import { applySkillTrim, agentKeyOf } from './lib/skills-trim.js'
 import { looksLikeCorrection, correctionRecord } from './lib/correction.js'
+import { compatReport, readPluginVersions, readHostVersions, checkHostApis } from './lib/compat.js'
 import { createStruggleTracker, recordStruggle, symptomQuery, readStruggles } from './lib/struggle.js'
 import { createCapabilityManager, loadCatalogSnapshot } from './lib/capabilities.js'
 // updateUsage 而不是 loadUsage+saveUsage：证据账的读-改-写必须整段串行，
@@ -67,6 +68,15 @@ function buildUserMessage(text, source) {
  *   把子代理当主代理 = 退回旧行为（已知的坏行为，但不会更坏）；
  *   把主代理当子代理 = 主代理从此不再积累任何证据 —— 那才是真事故。
  */
+/**
+ * 插件声明的宿主可接受范围。
+ *
+ * ★ **唯一真源**：package.json 的 peerDependencies 是给人看的，这里是给运行时判的。
+ *   两处不一致就会得出相反的结论 —— 这个项目为「阈值两处各写一份」栽过一次
+ *   （见 lib/config.js 里 recall 阈值那段注释）。
+ */
+const HOST_RANGE = '>=0.1.0-rc.6 <0.2.0'
+
 function delegationDepth(agent) {
   try {
     const h = agent?.session?.header?.delegationDepth
@@ -265,6 +275,35 @@ export function apply(ctx, pluginConfig = {}) {
   // 同步档：只在**重路径的阶段边界**用。默认的异步写盘在原生崩溃时会丢，
   // 而宿主崩过三次、每次都只剩 crashpad 一行 —— 没有这档就等于没有证据。
   const trace = createLogger(baseRoot, { sync: true })
+
+  // ── 宿主兼容性自检 ──
+  //
+  // 实测（2026-09-11）：插件自带 dsh-tools@**rc.8**，宿主跑 **rc.12**，
+  // 而 import 解析到的是**插件自带那份** —— 同一进程里两份实现。
+  // 它现在能跑通，但那是运气；rc 阶段任何内部形状变化都可能让它悄悄失效，
+  // 且不会有任何报错。
+  //
+  // 所以这里只做一件事：**把它摆出来**。不自动切换实现 ——
+  // 没有证据表明两份有行为差异，为想象中的差异写兼容层只会多一条
+  // 没人走过、也没人敢删的路径。
+  void (async () => {
+    try {
+      const report = compatReport({
+        pluginVersions: readPluginVersions(),
+        hostVersions: await readHostVersions(),
+        range: HOST_RANGE,
+        apis: checkHostApis(ctx),
+      })
+      log('compat:\n' + report.rendered)
+      if (report.differs.length) {
+        log('compat: ★ 插件自带与宿主实际版本不一致 —— import 加载的是插件自带那份（见 lib/compat.js 说明）')
+      }
+      if (report.inRange === false) log('compat: ★ 宿主版本超出声明范围 ' + HOST_RANGE + '，可能有破坏性变更')
+      if (report.apis && report.apis.missing && report.apis.missing.length) {
+        log('compat: ★ 缺少必需的宿主 API: ' + report.apis.missing.map(m => m.path).join(', '))
+      }
+    } catch (e) { log('compat check failed (non-fatal):', e?.message ?? e) }
+  })()
 
   // ── 工具注册 ──
   ctx.effect(() => {
