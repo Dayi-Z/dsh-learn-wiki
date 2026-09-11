@@ -57,12 +57,16 @@
     "ui:probe": "node scripts/ui-probe.mjs",
     "ui:snapshot": "node scripts/ui-snapshot.mjs"
   },
-  "dependencies": {
-    "@deepseek-ai/dsh-llm": "0.1.0-rc.8",
-    "@deepseek-ai/dsh-tools": "0.1.0-rc.8"
-  },
   "peerDependencies": {
     "@deepseek-ai/dsh-llm": ">=0.1.0-rc.6 <0.2.0",
     "@deepseek-ai/dsh-tools": ">=0.1.0-rc.6 <0.2.0"
+  },
+  "devDependencies": {
+    "@deepseek-ai/dsh-llm": "0.1.0-rc.8",
+    "@deepseek-ai/dsh-tools": "0.1.0-rc.8"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-llm": { "optional": false },
+    "@deepseek-ai/dsh-tools": { "optional": false }
   }
 }

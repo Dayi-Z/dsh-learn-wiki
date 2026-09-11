@@ -147,12 +147,24 @@
 - `verify-session-isolation`：一半用例在测失败路径（超时 / 文件缺失 / 未知 kind
   都必须返回 `ok:false` 而不是抛异常）。
 
-### 待办（见 README「状态」与 PRODUCT.md）
+### 打包（为 DSHmarket 上架调整）
 
-- **彻底消除"两份实现"**：当前插件自带 `dsh-{tools,llm}@rc.8`，宿主跑 `rc.12`。
-  现在能跑通，但那是运气。要真正解决得确认 DSH 对宿主模块的提供约定
-  （其它插件做法不一：guardian 一个都不带、dshmarket 声明为 peer 且不打包、
-  gitcompass 直接当 deps 带）。在有定论之前只做检测，不做想当然的改造。
+- **官方 `@deepseek-ai/*` 包改为只声明 `peerDependencies`**（pinned 版本移到
+  `devDependencies` 供本地测试）。这正是"两份实现"问题的正规解法 ——
+  DSHmarket 的 contributing.md 明确要求"Declare official `@deepseek-ai/*`
+  packages as `peerDependencies`, not `dependencies`"。
+  之前两处都写，于是用户安装时会装进第二份 `dsh-tools`，
+  与宿主那份在同一进程里并存（见 lib/compat.js 的实测记录）。
+  ★ 这只解决**用户侧**；本地开发因为 link 安装仍会有两份，那是 dev 环境的常态。
+- 安装段补上 `github:Dayi-Z/dsh-learn-wiki` 形式，并说明**零构建**
+  （纯 JS，无需 `allowBuilds` 授权）。
+
+★ 一处**验证后决定不改**的地方：contributing.md 警告 peer 范围若不带显式预发布分支
+会静默排除所有预发布版本。用真 semver 实测我们的范围 `>=0.1.0-rc.6 <0.2.0`
+对 `0.1.0-rc.6 / rc.8 / rc.12` **都返回 true** —— 因为 `>=0.1.0-rc.6` 这个比较符
+正好落在 `0.1.0` 元组上且自带预发布标签，满足文档说的那个必要条件。
+文档被打叉的形态是 `>=0.0.1-rc.1 <0.2.0`（比较符落在 0.0.1 与 0.2.0 上）。
+所以这里**不改** —— 改了会让一个正常的东西变成另一种写法，而且看不出区别。
 
 ## [0.1.0] — 2026-09-11
 

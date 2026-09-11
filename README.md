@@ -37,9 +37,20 @@ DSH 的「边做边学」知识库插件：**工作前自动检索 → 未命中
 ## 安装
 
 ```powershell
+# 从 GitHub 安装
+dsh plugin --profile web add github:Dayi-Z/dsh-learn-wiki
+
+# 本地开发（直接链接到源码目录）
 dsh plugin --profile web add link:D:/Harness/dsh-learn-wiki
+
 # 重启 DSH 生效
 ```
+
+**零构建。** 插件是纯 JS：host 半是 ESM，client 半是手写 CJS（由 `window.__ModuleLoader__` 装载）。
+没有打包步骤，所以从源码安装不需要 `allowBuilds` 授权，也不需要预先构建产物。
+
+依赖只声明为 `peerDependencies`（`@deepseek-ai/dsh-tools` / `dsh-llm`）——
+它们由宿主提供，**不要**装第二份：同一进程里存在两份实现会让 `import` 解析到插件自带的那份。
 
 ## 配置
 
