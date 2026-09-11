@@ -46,6 +46,7 @@
     "verify:subagent-guard": "node scripts/verify-subagent-guard.mjs",
     "verify:harvest": "node scripts/verify-harvest.mjs",
     "verify:sessions": "node scripts/verify-sessions.mjs",
+    "verify:nonblocking": "node scripts/verify-nonblocking.mjs",
     "ui:probe": "node scripts/ui-probe.mjs",
     "ui:snapshot": "node scripts/ui-snapshot.mjs"
   },
