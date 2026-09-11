@@ -128,7 +128,10 @@ window.__ModuleLoader__.load({
       '.lw-panel{width:min(1040px,94vw);height:min(760px,88vh);display:flex;flex-direction:column;overflow:hidden;',
       'padding:16px 18px 0;box-sizing:border-box;',
       'border-radius:14px;border:1px solid var(--lw-line);background:var(--lw-surface);',
-      'box-shadow:0 1px 2px rgba(0,0,0,.20),0 16px 48px rgba(0,0,0,.36)}',
+      // 阴影也走 DSH 的 token。原来写死 rgba(0,0,0,.20/.36) —— 深色主题下
+      // 黑色阴影几乎看不见，而浅色主题下它又偏重，两边都不跟主题。
+      // 字面值退到 var() 的回退位里（那也是本文件里唯一允许出现字面色值的地方）。
+      'box-shadow:var(--dsw-shadow-lv2,0 1px 2px rgba(0,0,0,.20),0 16px 48px rgba(0,0,0,.36))}',
       '.lw-shell{display:flex;flex-direction:column;flex:1;min-height:0;width:100%}',
       '.lw-head{display:flex;align-items:center;gap:9px;padding:0 0 12px}',
       '.lw-headicon{display:flex;align-items:center;color:var(--lw-fg2)}',
@@ -221,28 +224,66 @@ window.__ModuleLoader__.load({
       'border:0;border-radius:8px;background:transparent;color:inherit;font:inherit;cursor:pointer;text-align:left}',
       '.lw-fb:hover{background:var(--lw-hover)}',
       '.lw-fb-badge{margin-left:auto;font:var(--dsw-font-xxxs-11,11px/16px system-ui,sans-serif);color:var(--lw-fg4);font-variant-numeric:tabular-nums}',
-      // 待办计数角标：只在**有东西等你**时才出现，所以用醒目色。
+      // ── 待办计数角标 ──
+      //
+      // ★ 配色**必须**用 DSH 的按钮 token 成对出现，不能自己配 "#fff 压深色底"。
+      //   原先写死 color:#fff 就是"字体与按钮同色、完全不可见"的原因：
+      //   --dsw-alias-button-primary-fill 在浅色主题下不是深色，
+      //   白字压上去等于没字。DSH 自己给的配对是
+      //   background=button-primary-fill / color=label-primary-foreground。
       '.lw-fb-dot{flex:none;min-width:16px;height:16px;padding:0 5px;border-radius:99px;box-sizing:border-box;',
-      'display:inline-flex;align-items:center;justify-content:center;background:var(--lw-brand);color:#fff;',
+      'display:inline-flex;align-items:center;justify-content:center;',
+      'background:var(--dsw-alias-button-primary-fill,var(--lw-brand));',
+      'color:var(--dsw-alias-label-primary-foreground,#fff);',
       'font:var(--dsw-font-xxxs-11,11px/16px system-ui,sans-serif);font-variant-numeric:tabular-nums}',
-      // ── 输入框上方的常驻提示条 ──
-      // 独占一整行（conversation.input.dock 给的座位就是一行），
-      // 所以要自己收边距，别撑破 composer 卡片的宽度。
-      // ★ 这个条子挂在 composer 里，离 .lw-root 很远 —— 而整套 --lw-* 变量是定义在
-      //   .lw-root 上的，不是 :root。所以组件上必须**同时带 lw-root 类**，
+      // ── 输入框上方的待办条 ──
+      //
+      // 三层约束，缺一条都会"看着不对"：
+      //
+      // 1) **宽度**：座位 conversation.input.dock 是**整行宽**的
+      //    （catalog 原话：a full-width row of its own —— 而且它点名 "a todo strip"
+      //     就是这个用途）。所以要自己收到和输入框一样宽，否则会横跨整个对话区。
+      //    780px 不是我拍的：DSH 自己的 --dsh-composer-card-max-width
+      //    = --dsh-chat-content-width(748) + 32。直接用它的变量，它改我跟着改。
+      // 2) **外观**：照抄 DSH 自己在这个位置的样式 ._5M8isa_notice
+      //    （composer 卡片上方的一条提示）—— 同一位置、同一宽度、同一字号，
+      //    没有理由另造一套。
+      // 3) **按钮**：逐条照抄 DSH 的 Button CSS 模块（kz6gm），
+      //    包括 primary 的配色配对与 disabled 的 opacity:.4。
+      //    自己发明配色正是"按钮未与主题同步"的来源。
+      //
+      // ★ 另外：这个条子挂在 composer 里，离 .lw-root 很远 —— 而整套 --lw-* 变量是
+      //   定义在 .lw-root 上的，不是 :root。所以组件上必须**同时带 lw-root 类**，
       //   否则这里每一个 var(--lw-*) 都是未定义（无回退值时整条声明失效）。
-      '.lw-pend{box-sizing:border-box;width:100%;display:flex;align-items:center;gap:8px;flex-wrap:wrap;',
-      'margin:0 auto 6px;padding:6px 10px;border-radius:10px;',
-      'background:var(--lw-raise);border:1px solid var(--lw-line);color:var(--lw-fg2)}',
-      '.lw-pend-txt{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
-      '.lw-pend b{color:var(--lw-fg);font-variant-numeric:tabular-nums}',
-      '.lw-pend-btn{flex:none;box-sizing:border-box;padding:3px 10px;border-radius:7px;cursor:pointer;',
-      'border:1px solid var(--lw-line);background:transparent;color:var(--lw-fg2);',
+      // 宽度用的是**和输入框卡片完全相同的公式**，不是"差不多"：
+      //   卡片 = min(容器宽 - 2*side-clearance, card-max-width)
+      // 只写 max-width 的话，窄屏下条子会比卡片宽出两个 side-clearance（32px），
+      // 而那正是"没对齐"看起来最刺眼的地方。
+      '.lw-pend{box-sizing:border-box;width:calc(100% - 2 * var(--dsh-composer-side-clearance,16px));',
+      'max-width:var(--dsh-composer-card-max-width,780px);',
+      'display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0 auto 6px;padding:4px 8px;',
+      'border-radius:8px;background:var(--dsw-alias-interactive-bg-hover);',
+      'color:var(--dsw-alias-label-secondary,var(--lw-fg2));',
+      // 字号走 DSH 的阶梯，不手写 —— 手写的结果就是 11/11.5/12/12.5/13 混在一个面板里
       'font:var(--dsw-font-xxs-12,12px/18px system-ui,sans-serif)}',
-      '.lw-pend-btn:hover{background:var(--lw-hover);color:var(--lw-fg)}',
-      '.lw-pend-btn.primary{border-color:transparent;background:var(--lw-brand);color:#fff}',
-      '.lw-pend-btn.primary:hover{opacity:.9;color:#fff}',
-      '.lw-pend-btn[disabled]{opacity:.5;cursor:default}',
+      '.lw-pend-txt{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+      '.lw-pend b{color:var(--dsw-alias-label-primary,var(--lw-fg));font-variant-numeric:tabular-nums;font-weight:600}',
+      // Button(sm)：display/gap/height/padding/圆角/字号全部照 DSH 的 kz6gm 模块
+      '.lw-pend-btn{flex:none;box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;',
+      'gap:4px;height:28px;padding:0 10px;border-radius:14px;cursor:pointer;',
+      'border:1px solid var(--dsw-alias-border-l2);background:transparent;',
+      'color:var(--dsw-alias-label-primary,var(--lw-fg));',
+      'font:var(--dsw-font-xxs-12,12px/18px system-ui,sans-serif)}',
+      // ghost/outline 的悬停与按下
+      '.lw-pend-btn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}',
+      '.lw-pend-btn:active:not(:disabled){background:var(--dsw-alias-interactive-bg-active)}',
+      // primary：配对使用 fill / foreground，绝不自己配白字
+      '.lw-pend-btn.primary{border-color:transparent;',
+      'background:var(--dsw-alias-button-primary-fill,var(--lw-brand));',
+      'color:var(--dsw-alias-label-primary-foreground,#fff)}',
+      '.lw-pend-btn.primary:hover:not(:disabled){background:var(--dsw-alias-button-primary-hover,var(--lw-brand))}',
+      '.lw-pend-btn.primary:active:not(:disabled){background:var(--dsw-alias-button-primary-hover,var(--lw-brand))}',
+      '.lw-pend-btn:disabled{cursor:not-allowed;opacity:.4}',
     ].join('')
 
     var styled = false
