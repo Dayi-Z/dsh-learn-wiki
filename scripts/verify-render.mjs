@@ -58,7 +58,7 @@ check('导出测试接缝 __components / __logic',
   Object.keys(M.__components || {}).join(','))
 if (!M.__components || !M.__logic) { console.log('\n无法继续'); process.exit(1) }
 
-const { toolGroups, knowledgeView, KFILTERS } = M.__logic
+const { toolGroups, knowledgeView, KFILTERS, pendingTotal } = M.__logic
 
 // ── 1. 纯逻辑（不经 React） ──
 console.log('')
@@ -231,18 +231,80 @@ check('能力页签：有工具/技能分段导航（71+11 堆一列的问题）
 check('能力页签：默认只画工具段（不是两段首尾相接）',
   !capHtml.includes('常驻目录'))
 
+// ── 2.5 输入框上方的待办提示条 ──
+//
+// 这条子要解决的是一个非技术问题：staged 固化与 .trash 分拣全靠人工，
+// 而界面上没有任何东西提示"有东西在等"。所以测的重点不是"画得好不好看"，
+// 而是两条**行为契约**：
+//   * 没待办时**整条不出现**（常驻噪音会训练人忽略它）
+//   * 有可固化页时，第一屏是「全部固化」而**不是**「确认固化」
+//     —— 一键写多个文件必须先问一句，误触的代价比多一次点击大
+console.log('')
+console.log('── 待办提示条（输入框上方） ──')
+
+check('待办总数：无数据算 0', pendingTotal(null) === 0)
+check('待办总数：三段相加（待固化 + 回收站 + 已拒绝）',
+  pendingTotal({ stagedTotal: 6, trash: 10, rejected: 2 }) === 18,
+  String(pendingTotal({ stagedTotal: 6, trash: 10, rejected: 2 })))
+check('待办总数：缺字段不炸', pendingTotal({ stagedTotal: 3 }) === 3)
+
+{
+  const P = M.__components.PendingBar
+  check('导出了 PendingBar（否则这条子根本无法被断言）', typeof P === 'function')
+
+  const empty = renderToStaticMarkup(h(P, { pending: { stagedTotal: 0, stagedReady: 0, trash: 0, rejected: 0, staged: [] } }))
+  check('★ 没待办时整条不渲染（返回空，不是画一条 0）', empty === '', JSON.stringify(empty))
+
+  const bar = renderToStaticMarkup(h(P, {
+    pending: {
+      stagedTotal: 6, stagedReady: 6, trash: 10, rejected: 2,
+      staged: [{ id: 'a', ready: true }, { id: 'b', ready: true }],
+    },
+  }))
+  check('有待办时画出来', bar.length > 0, bar.length + ' 字符')
+  check('★ 条上带 lw-root —— 整套 --lw-* 变量定义在 .lw-root 上而不是 :root，',
+    bar.includes('lw-root') && bar.includes('lw-pend'),
+    '这一条错了整条就会是无样式裸标签（无回退值的 var() 会让声明整条失效）')
+  check('数字说全了：页数与待分拣数分开报',
+    bar.includes('6') && bar.includes('页待固化') && bar.includes('12') && bar.includes('个待分拣'),
+    bar.replace(/<[^>]+>/g, '|').slice(0, 120))
+  check('★ 第一屏是「全部固化」，且**没有**直接出现「确认固化」（一键写多文件必须先问一句）',
+    bar.includes('全部固化') && !bar.includes('确认固化'),
+    JSON.stringify([bar.includes('全部固化'), bar.includes('确认固化')]))
+  check('有「处理」入口（点开完整面板）', bar.includes('处理'))
+  check('用 role=status + aria-live 播报（读屏用户也该知道有东西在等）',
+    bar.includes('role="status"') && bar.includes('aria-live="polite"'))
+
+  // 没有可固化页、只有待分拣时：不该出现「全部固化」
+  const onlyTriage = renderToStaticMarkup(h(P, {
+    pending: { stagedTotal: 2, stagedReady: 0, trash: 3, rejected: 0, staged: [{ id: 'x', ready: false }] },
+  }))
+  check('★ 没有「已通过闸门」的页时不出现「全部固化」',
+    !onlyTriage.includes('全部固化') && onlyTriage.includes('待分拣'),
+    onlyTriage.replace(/<[^>]+>/g, '|').slice(0, 120))
+}
+
 // ── 3. 退化路径 ──
 console.log('')
 console.log('── 退化路径（原语 require 失败，界面不能整个消失） ──')
 const M2 = H.build(false)
-for (const [label, Component] of [
-  ['能力页签', M2.__components.CapabilitiesTab],
-  ['知识页签', M2.__components.KnowledgeTab],
-  ['补料页签', M2.__components.SupplyTab],
-  ['底栏入口', M2.__components.FooterEntry],
+// 每个组件的 props 不同：页签吃 state，提示条吃 pending。
+// ★ 之前给提示条也喂 state，于是它按"没待办"正确地渲染了空，
+//   测试却报"没画出内容"—— 那是断言写错了，不是代码错了。
+//   讽刺的是这条错误恰好又证明了"没待办时不渲染"是对的。
+const PENDING_FIXTURE = {
+  stagedTotal: 2, stagedReady: 2, trash: 1, rejected: 0,
+  staged: [{ id: 'a', title: 'A', ready: true }, { id: 'b', title: 'B', ready: true }],
+}
+for (const [label, Component, props] of [
+  ['能力页签', M2.__components.CapabilitiesTab, { state }],
+  ['知识页签', M2.__components.KnowledgeTab, { state }],
+  ['补料页签', M2.__components.SupplyTab, { state }],
+  ['底栏入口', M2.__components.FooterEntry, { state }],
+  ['待办提示条', M2.__components.PendingBar, { pending: PENDING_FIXTURE }],
 ]) {
   try {
-    const html = renderToStaticMarkup(h(Component, { state }))
+    const html = renderToStaticMarkup(h(Component, props))
     check('无原语时 ' + label + ' 仍然渲染', true)
     if (Component !== M2.__components.FooterEntry) {
       check('无原语时 ' + label + ' 画出了内容', html.length > 200, 'html=' + html.length + ' 字符')

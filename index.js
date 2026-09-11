@@ -13,7 +13,7 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { createUserMessage as hostCreateUserMessage } from '@deepseek-ai/dsh-llm'
 import { loadConfig, DEFAULTS } from './lib/config.js'
-import { loadPages, ensureRepo, savePage, commitReadiness } from './lib/wiki.js'
+import { loadPages, ensureRepo, savePage, commitReadiness, readStagedBrief, countTriage } from './lib/wiki.js'
 import { readFile, writeFile, unlink } from 'node:fs/promises'
 import { join } from 'node:path'
 import { buildCorpus, scoreQuery, triage, recallable, looksLikeGap } from './lib/recall.js'
@@ -395,6 +395,36 @@ export function apply(ctx, pluginConfig = {}) {
           return
         }
 
+        // ── 读路径 4：待办计数（**轻量**，供常驻界面轮询）──
+        //
+        // 为什么不复用 /api/state：那条路径会把整个知识库（pages/ 全部正文）、
+        // 使用账本、缺口队列、挣扎记录都读一遍再返回。输入框上方那条提示条是
+        // **常驻**的，让它每 30 秒触发一次全库读取，就是拿用户的磁盘换一个数字。
+        // 这里只读 staged/ 的 frontmatter 并数两个目录。
+        if (url.pathname === '/learn-wiki/api/pending' && req.method === 'GET') {
+          const brief = await readStagedBrief(cfg.wikiRoot)
+          const triageCounts = await countTriage(cfg.wikiRoot)
+          const items = brief.map(p => {
+            // 用与 wiki_commit / api/commit 同一个闸门算 ready，
+            // 否则界面会显示"可固化"而真按下时被 409 拒掉。
+            const r0 = commitReadiness(p)
+            return {
+              id: p.id, title: p.title, category: p.category, confidence: p.confidence,
+              sources: (p.sources ?? []).length, ready: r0.ready, blockers: r0.blockers ?? [],
+            }
+          })
+          send(200, {
+            ok: true,
+            ts: new Date().toISOString(),
+            staged: items,
+            stagedTotal: items.length,
+            stagedReady: items.filter(i => i.ready).length,
+            trash: triageCounts.trash,
+            rejected: triageCounts.rejected,
+          })
+          return
+        }
+
         if (url.pathname !== '/learn-wiki/api/state') { send(404, { ok: false, error: 'not found' }); return }
 
         const { pages } = await loadPages(cfg.wikiRoot)
@@ -500,7 +530,7 @@ export function apply(ctx, pluginConfig = {}) {
     // 前端拿到 index.html（**HTTP 200**，content-type: text/html）。
     // 这个比 404 更难查：状态码是成功的。
     const dispose = ctx.webServer.register({ kind: 'prefix', path: '/learn-wiki', handler })
-    log('ui: /learn-wiki 已注册（prefix，覆盖 api/state|page|commit|capabilities）')
+    log('ui: /learn-wiki 已注册（prefix，覆盖 api/state|page|commit|capabilities|pending）')
     return () => { try { dispose() } catch {} }
   }, 'dsh-learn-wiki: ui route')
 

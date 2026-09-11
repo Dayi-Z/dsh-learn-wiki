@@ -47,10 +47,11 @@ const matchesPrefix = (prefix, pathname) => pathname === prefix || pathname.star
 const API_PATHS = [
   '/learn-wiki/api/state', '/learn-wiki/api/page',
   '/learn-wiki/api/commit', '/learn-wiki/api/capabilities',
+  '/learn-wiki/api/pending',
 ]
 const regd = route && route.kind === 'prefix' ? route.path : null
 const unmatched = API_PATHS.filter(p => !(regd !== null && matchesPrefix(regd, p)))
-check('★ 按宿主的真实匹配规则，四条 API 路径全部可达',
+check('★ 按宿主的真实匹配规则，每条 API 路径都可达',
   unmatched.length === 0, 'prefix=' + JSON.stringify(regd) + ' 匹配不上的: ' + JSON.stringify(unmatched))
 
 // 造一个假的 req/res 来调用 handler
@@ -119,6 +120,47 @@ if (payload) {
   }
   walk(payload, '$')
   check('★ 接口输出是 lossless JSON', bad.length === 0, bad.slice(0, 5).join(', '))
+}
+
+// ── 轻量待办端点 ──
+//
+// 它会被**常驻界面**轮询（输入框上方那条提示条），所以这里额外钉两件事：
+//   1. 口径：stagedReady 必须真的等于 staged 里 ready 的条数，而且用的是
+//      **同一个 commitReadiness**。对不上的后果是界面显示"全部固化"、
+//      一按却全被 409 拒掉 —— 那比不显示还糟。
+//   2. 体量：这条路径每 30 秒跑一次，不能顺手把整个知识库读一遍。
+{
+  const pend = await call('/learn-wiki/api/pending')
+  check('pending 返回 200', pend.code === 200, 'code=' + pend.code + (pend.code !== 200 ? ' body=' + String(pend.body).slice(0, 200) : ''))
+  let pj = null
+  try { pj = JSON.parse(pend.body) } catch (e) { check('pending 响应是合法 JSON', false, e.message) }
+  if (pj) {
+    check('pending 响应是合法 JSON', true)
+    check('pending ok=true', pj.ok === true)
+    check('pending stagedTotal 与数组长度一致', pj.stagedTotal === (pj.staged || []).length,
+      'total=' + pj.stagedTotal + ' len=' + (pj.staged || []).length)
+    check('pending stagedReady 与逐条 ready 一致',
+      pj.stagedReady === (pj.staged || []).filter(x => x.ready).length,
+      'stagedReady=' + pj.stagedReady)
+    check('pending trash/rejected 都是数字',
+      Number.isFinite(pj.trash) && Number.isFinite(pj.rejected),
+      'trash=' + pj.trash + ' rejected=' + pj.rejected)
+
+    // ★ 跨路径一致性：拿真正的闸门复算一遍。
+    //   这条断言的价值在于它**跨了两个实现**（HTTP 层 vs lib/wiki.js），
+    //   单独测哪一边都发现不了口径漂移。
+    const { loadPages: lp, commitReadiness: cr } = await import('../lib/wiki.js')
+    const { pages: realPages } = await lp(ROOT)
+    const realStaged = realPages.filter(p => p.status === 'staged')
+    const realReady = realStaged.filter(p => cr(p).ready).map(p => p.id).sort()
+    const apiReady = (pj.staged || []).filter(x => x.ready).map(x => x.id).sort()
+    check('★ ready 与 lib 的 commitReadiness 复算完全一致',
+      JSON.stringify(realReady) === JSON.stringify(apiReady),
+      'api=' + JSON.stringify(apiReady) + ' lib=' + JSON.stringify(realReady))
+    check('★ 每条都带 blockers 字段（界面据此解释为什么不能固化）',
+      (pj.staged || []).every(x => Array.isArray(x.blockers)),
+      JSON.stringify((pj.staged || []).slice(0, 2).map(x => x.id + ':' + JSON.stringify(x.blockers))))
+  }
 }
 
 const nf = await call('/learn-wiki/nope')

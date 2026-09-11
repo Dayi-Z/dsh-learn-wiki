@@ -221,6 +221,28 @@ window.__ModuleLoader__.load({
       'border:0;border-radius:8px;background:transparent;color:inherit;font:inherit;cursor:pointer;text-align:left}',
       '.lw-fb:hover{background:var(--lw-hover)}',
       '.lw-fb-badge{margin-left:auto;font:var(--dsw-font-xxxs-11,11px/16px system-ui,sans-serif);color:var(--lw-fg4);font-variant-numeric:tabular-nums}',
+      // 待办计数角标：只在**有东西等你**时才出现，所以用醒目色。
+      '.lw-fb-dot{flex:none;min-width:16px;height:16px;padding:0 5px;border-radius:99px;box-sizing:border-box;',
+      'display:inline-flex;align-items:center;justify-content:center;background:var(--lw-brand);color:#fff;',
+      'font:var(--dsw-font-xxxs-11,11px/16px system-ui,sans-serif);font-variant-numeric:tabular-nums}',
+      // ── 输入框上方的常驻提示条 ──
+      // 独占一整行（conversation.input.dock 给的座位就是一行），
+      // 所以要自己收边距，别撑破 composer 卡片的宽度。
+      // ★ 这个条子挂在 composer 里，离 .lw-root 很远 —— 而整套 --lw-* 变量是定义在
+      //   .lw-root 上的，不是 :root。所以组件上必须**同时带 lw-root 类**，
+      //   否则这里每一个 var(--lw-*) 都是未定义（无回退值时整条声明失效）。
+      '.lw-pend{box-sizing:border-box;width:100%;display:flex;align-items:center;gap:8px;flex-wrap:wrap;',
+      'margin:0 auto 6px;padding:6px 10px;border-radius:10px;',
+      'background:var(--lw-raise);border:1px solid var(--lw-line);color:var(--lw-fg2)}',
+      '.lw-pend-txt{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+      '.lw-pend b{color:var(--lw-fg);font-variant-numeric:tabular-nums}',
+      '.lw-pend-btn{flex:none;box-sizing:border-box;padding:3px 10px;border-radius:7px;cursor:pointer;',
+      'border:1px solid var(--lw-line);background:transparent;color:var(--lw-fg2);',
+      'font:var(--dsw-font-xxs-12,12px/18px system-ui,sans-serif)}',
+      '.lw-pend-btn:hover{background:var(--lw-hover);color:var(--lw-fg)}',
+      '.lw-pend-btn.primary{border-color:transparent;background:var(--lw-brand);color:#fff}',
+      '.lw-pend-btn.primary:hover{opacity:.9;color:#fff}',
+      '.lw-pend-btn[disabled]{opacity:.5;cursor:default}',
     ].join('')
 
     var styled = false
@@ -1298,36 +1320,214 @@ window.__ModuleLoader__.load({
         // 离线截图要画的是**这个外壳**里带数据的真实内容，
         // 而不是另搭一个长得像的壳。桌面运行时这几个 prop 都不存在，
         // 走的就是"自己拉数据"那条路。
-      }, h(PanelBody, props.state ? {
+        // ★ 三个 prop 都要**无条件**传下去。原来写成"受控才传"，
+        //   而桌面运行时 props.state 是空的 —— 于是 initialTab 被静默丢掉，
+        //   提示条点「处理」想跳到知识页签会跳到默认页签，看起来像没反应。
+        //   PanelBody 自己用 state 是否存在来判断受控，不需要这里替它挡。
+      }, h(PanelBody, {
         state: props.state,
         initialTab: props.initialTab,
         initialSeg: props.initialSeg,
-      } : null)))
+      })))
+    }
+
+    // ── 待办：谁在等、怎么把面板打开 ─────────────────────────────────────
+    //
+    // 这一块要解决的是一个**非技术**问题：staged 固化与 .trash 分拣全靠人工，
+    // 但界面上没有任何东西告诉你"有东西在等"——侧边栏入口是个沉默图标，
+    // 于是 6 页暂存能一直积压到有人想起来去看。
+    //
+    // 两个座位（侧边栏入口、输入框上方提示条）都要能开同一个面板，
+    // 所以开关**不能**是某个组件的 useState —— 那样另一处够不着。
+    // 用一个极小的订阅式 store：谁都能 set，谁订阅谁重渲染。
+
+    var PENDING_API = '/learn-wiki/api/pending'
+
+    function makeStore(initial) {
+      var v = initial
+      var subs = []
+      return {
+        get: function () { return v },
+        set: function (next) {
+          v = next
+          for (var i = 0; i < subs.length; i++) { try { subs[i]() } catch (e) { /* 一个订阅者坏了不该拖垮其余 */ } }
+        },
+        subscribe: function (f) {
+          subs.push(f)
+          return function () { var i = subs.indexOf(f); if (i >= 0) subs.splice(i, 1) }
+        },
+      }
+    }
+
+    /** 面板开关 + 打开时落在哪个页签。 */
+    var benchStore = makeStore({ open: false, tab: null })
+    function useBench() {
+      var s = useState(benchStore.get())
+      useEffect(function () { return benchStore.subscribe(function () { s[1](benchStore.get()) }) }, [])
+      return s[0]
+    }
+
+    /**
+     * 待办计数。**两个组件共用一个 store**，所以只轮询一次 ——
+     * 各拉各的就会变成每 30 秒两条请求。
+     *
+     * 轮询间隔取 30 秒：这是"知识库攒了几页"这种尺度的事情，
+     * 秒级刷新没有意义，只会白烧磁盘。不可见时一律不拉。
+     */
+    var pendingStore = makeStore({ data: null, err: null })
+    var pendingTimer = null
+    function loadPending() {
+      return getJson(PENDING_API).then(function (r) {
+        var prev = pendingStore.get()
+        if (r.j && r.j.ok) pendingStore.set({ data: r.j, err: null })
+        else pendingStore.set({ data: prev.data, err: r.error || (r.j && r.j.error) || ('HTTP ' + r.status) })
+      })
+    }
+    function startPendingPolling() {
+      if (pendingTimer) return
+      loadPending()
+      pendingTimer = setInterval(function () {
+        if (typeof document === 'undefined' || document.visibilityState !== 'hidden') loadPending()
+      }, 30000)
+    }
+    function usePending() {
+      var s = useState(pendingStore.get())
+      useEffect(function () {
+        startPendingPolling()
+        return pendingStore.subscribe(function () { s[1](pendingStore.get()) })
+      }, [])
+      return s[0]
+    }
+
+    /** 待办总数。0 表示"没事等你"，界面据此决定要不要出现。 */
+    function pendingTotal(d) {
+      if (!d) return 0
+      return (d.stagedTotal || 0) + (d.trash || 0) + (d.rejected || 0)
     }
 
     function FooterEntry() {
       ensureStyle()
-      var openState = useState(false)
-      var open = openState[0], setOpen = openState[1]
+      var bench = useBench()
+      var open = bench.open
+      var p = usePending()
       useEffect(function () {
         if (!open) return
-        var onKey = function (e) { if (e.key === 'Escape') setOpen(false) }
+        var onKey = function (e) { if (e.key === 'Escape') benchStore.set({ open: false, tab: null }) }
         document.addEventListener('keydown', onKey)
         return function () { document.removeEventListener('keydown', onKey) }
       }, [open])
       var icon = Ico('IconSkillOutline16', 16)
+      var n = pendingTotal(p.data)
       return h('div', { style: { display: 'contents' } },
         h('button', {
           type: 'button',
           className: 'lw-fb',
-          title: 'learn-wiki —— 能力 / 知识 / 补料',
+          // 标题里把数字说全 —— 光一个角标不解释是什么在等。
+          title: n > 0
+            ? 'learn-wiki —— ' + (p.data.stagedReady || 0) + ' 页可固化 / ' + (p.data.stagedTotal || 0) + ' 页暂存，' + ((p.data.trash || 0) + (p.data.rejected || 0)) + ' 个待分拣'
+            : 'learn-wiki —— 能力 / 知识 / 补料',
           'aria-expanded': open,
-          onClick: function () { setOpen(!open) },
+          onClick: function () { benchStore.set({ open: !open, tab: open ? null : null }) },
         },
           icon,
-          h('span', { className: 'lw-fb-label' }, 'learn-wiki')
+          h('span', { className: 'lw-fb-label' }, 'learn-wiki'),
+          // 角标只在**真有事**时出现。永远显示一个 0 会训练人忽略它。
+          n > 0 ? h('span', { className: 'lw-fb-dot' }, String(n)) : null,
         ),
-        open ? h(Workbench, { onClose: function () { setOpen(false) } }) : null
+        open ? h(Workbench, { initialTab: bench.tab || undefined, onClose: function () { benchStore.set({ open: false, tab: null }) } }) : null
+      )
+    }
+
+    /**
+     * 输入框上方的常驻提示条（座位：conversation.input.dock —— 它给的就是一行）。
+     *
+     * 设计取舍：
+     *   * 计数为 0 时**整条不渲染**。一个永远写"0 待办"的条子只是噪音，
+     *     而噪音会让人连"1 页待固化"也一起忽略。
+     *   * 「全部固化」是**两段式**的：先问一句再动手。它一次写多个文件，
+     *     误触的代价比多一次点击大。per-page 的固化入口仍在面板里。
+     *   * 这里**不做**自动固化。staged 是防投毒闸门（LLM 蒸馏出来的东西
+     *     一旦进 pages/ 就参与自动召回），拍板必须是人。这条条子只负责
+     *     把该拍板的事推到眼前，不替人拍。
+     */
+    function PendingBar(props) {
+      ensureStyle()
+      var p = usePending()
+      // 受控模式：调用方直接给数据（离线渲染与截图用）——与 PanelBody 同一套惯例。
+      // 服务端渲染不跑 useEffect，不给这个口子就永远只能渲染出"空"，
+      // 于是"这条子到底长什么样"没有任何自动化断言。
+      if (props && props.pending) p = { data: props.pending, err: null }
+      var confirming = useState(false)
+      var ask = confirming[0], setAsk = confirming[1]
+      var busy = useState(false)
+      var working = busy[0], setWorking = busy[1]
+      var noteState = useState(null)
+      var note = noteState[0], setNote = noteState[1]
+
+      var d = p.data
+      var total = pendingTotal(d)
+      if (!d || total === 0) return null
+
+      var ready = d.stagedReady || 0
+      var triage = (d.trash || 0) + (d.rejected || 0)
+
+      var commitAll = function () {
+        setWorking(true); setNote(null)
+        var ids = (d.staged || []).filter(function (x) { return x.ready }).map(function (x) { return x.id })
+        var okN = 0, failN = []
+        var step = function (i) {
+          if (i >= ids.length) {
+            setWorking(false); setAsk(false)
+            setNote(okN + ' 页已固化' + (failN.length ? '，' + failN.length + ' 页失败：' + failN.join('、') : ''))
+            loadPending()
+            return
+          }
+          post('/learn-wiki/api/commit', { id: ids[i] }).then(function (r) {
+            if (r.j && r.j.ok) okN++ ; else failN.push(ids[i])
+            step(i + 1)
+          })
+        }
+        // 逐个提交而不是并发：每个页面各自过一次 commitReadiness 闸门，
+        // 并发发起只会让失败信息互相盖住。
+        step(0)
+      }
+
+      var parts = []
+      if (d.stagedTotal > 0) parts.push(h('span', { key: 's' }, h('b', null, String(d.stagedTotal)), ' 页待固化'))
+      if (triage > 0) parts.push(h('span', { key: 't' }, h('b', null, String(triage)), ' 个待分拣'))
+
+      return h('div', {
+        // ★ lw-root 不能省：整套 --lw-* 变量定义在 .lw-root 上而不是 :root，
+        //   而这条子挂在 composer 里，离 .lw-root 很远。
+        className: 'lw-pend lw-root',
+        role: 'status',
+        'aria-live': 'polite',
+      },
+        h('span', { className: 'lw-pend-txt' },
+          ask
+            ? '确认固化这 ' + ready + ' 页？固化后它们立刻参与自动召回。'
+            : (note ? note : parts.reduce(function (acc, x) { return acc.concat(acc.length ? [' · '] : [], [x]) }, []))
+        ),
+        ask ? h('button', {
+          type: 'button', className: 'lw-pend-btn primary', disabled: working,
+          onClick: commitAll,
+        }, working ? '固化中…' : '确认固化') : null,
+        ask ? h('button', {
+          type: 'button', className: 'lw-pend-btn', disabled: working,
+          onClick: function () { setAsk(false) },
+        }, '取消') : null,
+        !ask && ready > 0 ? h('button', {
+          type: 'button', className: 'lw-pend-btn primary',
+          onClick: function () { setAsk(true); setNote(null) },
+        }, '全部固化') : null,
+        !ask ? h('button', {
+          type: 'button', className: 'lw-pend-btn',
+          onClick: function () { benchStore.set({ open: true, tab: 'knowledge' }) },
+        }, '处理') : null,
+        !ask && note ? h('button', {
+          type: 'button', className: 'lw-pend-btn',
+          onClick: function () { setNote(null) },
+        }, '知道了') : null
       )
     }
 
@@ -1350,6 +1550,25 @@ window.__ModuleLoader__.load({
           locale: name,
         }, FooterEntry)
       })
+      // 输入框上方的待办提示条。座位给的就是"独占一整行"，正是这条子要的。
+      //
+      // 座位规则（来自 DSH 的 slot-catalog）：注册到**未声明**的插槽会抛异常，
+      // 所以必须用 ctx.slots.inject 包住 —— 它在声明出现（或重新挂载）时才执行注册。
+      // 另外**不要**传 priority：框架会给一个低于所有内置项的值，单格里就是自己渲染。
+      try {
+        ctx.slots.inject('conversation.input.dock', function () {
+          return ctx.slots.register({
+            name: 'conversation.input.dock',
+            id: 'dsh-learn-wiki-pending',
+            order: 40,
+            locale: name,
+          }, PendingBar)
+        })
+      } catch (e) {
+        // 座位拿不到就不显示提示条，但**面板照旧可用**（侧边栏入口还在）。
+        // 一个附加的提示不该有能力拖垮整个插件。
+        try { console.error('[dsh-learn-wiki] 待办提示条座位不可用：', e) } catch (err) {}
+      }
     }
 
     exports.name = name
@@ -1367,7 +1586,7 @@ window.__ModuleLoader__.load({
      * 多一个字段对宿主是惰性的。
      */
     exports.__components = {
-      PanelBody, Workbench, FooterEntry,
+      PanelBody, Workbench, FooterEntry, PendingBar,
       CapabilitiesTab, ToolsSection, SkillsSection,
       KnowledgeTab, SupplyTab, PageDetail,
     }
@@ -1376,7 +1595,7 @@ window.__ModuleLoader__.load({
      * 纯逻辑也一并交出去：排序、分组、筛选不经过 React 就能被穷举断言。
      * 渲染测试只负责证明"这些结果能画出来且不崩"，两件事分开测。
      */
-    exports.__logic = { toolGroups, knowledgeView, KFILTERS, tabKeys }
+    exports.__logic = { toolGroups, knowledgeView, KFILTERS, tabKeys, pendingTotal }
 
     /**
      * 样式表原文。

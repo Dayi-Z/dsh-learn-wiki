@@ -28,7 +28,7 @@ import { execFile } from 'node:child_process'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { loadHarness, makeState, PLUGIN_ROOT } from './lib/ui-harness.mjs'
-import { buildDocument, loadTokens, VIEWS } from './lib/ui-preview.mjs'
+import { buildDocument, loadTokens, VIEWS, PENDING_FIXTURE } from './lib/ui-preview.mjs'
 
 const argv = process.argv.slice(2)
 const argOf = (name) => { const i = argv.indexOf(name); return i >= 0 ? argv[i + 1] : null }
@@ -313,9 +313,14 @@ if (picked.length === 0) {
 // 先把每个视图的 HTML 写出来（探针与截图看的是同一份页面）
 const pages = []
 for (const view of picked) {
-  const markup = H.renderToStaticMarkup(H.h(M.__components.Workbench, {
-    state, initialTab: view.tab, initialSeg: view.seg, onClose: () => {},
-  }))
+  // 与 ui-snapshot 保持同一套渲染：面板视图渲染整壳，component 视图渲染单个组件。
+  // 两处必须一致，否则"量到的"和"截到的"就不是同一个东西。
+  const markup = view.component
+    ? H.renderToStaticMarkup(H.h('div', { style: { padding: '28px 24px', maxWidth: '780px' } },
+        H.h(M.__components[view.component], { pending: PENDING_FIXTURE })))
+    : H.renderToStaticMarkup(H.h(M.__components.Workbench, {
+        state, initialTab: view.tab, initialSeg: view.seg, onClose: () => {},
+      }))
   const htmlPath = join(outDir, 'probe-' + view.id + '.html')
   await writeFile(htmlPath, buildDocument({ view, markup, pluginCss: M.__css, tokens, tokenNote, mode }), 'utf8')
   pages.push({ view, htmlPath })

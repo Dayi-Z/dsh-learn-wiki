@@ -89,4 +89,26 @@ export const VIEWS = [
   { id: 'capabilities-skills', title: '能力 · 技能', tab: 'capabilities', seg: 'skills' },
   { id: 'knowledge', title: '知识', tab: 'knowledge' },
   { id: 'supply', title: '补料', tab: 'supply' },
+  // 待办提示条不是面板的一个页签（它挂在输入框上方），所以单独渲染。
+  // 目的：让"这条子到底长什么样"不再是只能靠脑补的事。
+  { id: 'pending-bar', title: '输入框上方的待办提示条', component: 'PendingBar' },
 ]
+
+/**
+ * 待办提示条的夹具。
+ *
+ * 刻意用**真实形态的数据**（6 页暂存、10 个回收站条目、2 个已拒绝），
+ * 因为这条子的全部意义就是"数字准不准、够不够显眼"。
+ */
+export const PENDING_FIXTURE = {
+  ok: true,
+  staged: [
+    { id: 'a', title: '不要依赖凭据文件回退取模型凭据', category: 'lesson', confidence: 0.9, sources: 5, ready: true, blockers: [] },
+    { id: 'b', title: 'LLM 调用点必须在 JSON 解析失败时输出原始响应', category: 'decision', confidence: 0.85, sources: 3, ready: true, blockers: [] },
+    { id: 'c', title: '检测器返回空结果时必须先用违规样本证明它能失败', category: 'howto', confidence: 0.7, sources: 5, ready: true, blockers: [] },
+  ],
+  stagedTotal: 6,
+  stagedReady: 6,
+  trash: 10,
+  rejected: 2,
+}
