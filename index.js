@@ -23,6 +23,7 @@ import { buildCorpus, scoreQuery, triage, recallable, looksLikeGap } from './lib
 import { appendGap, runAcquisition, readGaps } from './lib/acquire.js'
 import { createLlm } from './lib/llm.js'
 import { createLogger } from './lib/log.js'
+import { applySkillTrim, agentKeyOf } from './lib/skills-trim.js'
 import { createStruggleTracker, recordStruggle, symptomQuery, readStruggles } from './lib/struggle.js'
 import { createCapabilityManager, loadCatalogSnapshot } from './lib/capabilities.js'
 // updateUsage 而不是 loadUsage+saveUsage：证据账的读-改-写必须整段串行，
@@ -724,6 +725,24 @@ export function apply(ctx, pluginConfig = {}) {
     // 否则同一轮内后续的 step 仍然看不到被找回的工具 —— 实测就是这样，
     // 放宽登记了却始终不生效。pre-step 在提示词组装之前，所以这里重算能赶上本步请求。
     try { caps.ensure(agent) } catch (e) { log('capabilities ensure failed (non-fatal):', e?.message ?? e) }
+
+    // ── 技能目录按 agent 裁剪 ──
+    //
+    // ★ 位置是关键：必须在 step!==1 的提前 return **之前**。
+    //   技能目录那条消息是**留在会话历史里**的，每一步组装提示词时都会带上，
+    //   所以只裁第一步等于没裁（后续每一步又原样带全量）。
+    //
+    // ★ 只改渲染文本，绝不碰 source.entries —— 宿主的 digest 覆盖 entries，
+    //   动它会让宿主判定目录变化并**每一步重发一遍**。
+    if (cfg.skills?.enabled === true && decision.messages?.length) {
+      try {
+        const t = applySkillTrim(decision.messages, { cfg, agentKey: agentKeyOf(agent), log })
+        if (t.changed) {
+          decision = { ...decision, messages: t.messages }
+          log('skills: 已按 ' + agentKeyOf(agent) + ' 裁剪目录（去掉 ' + t.removed + ' 条）')
+        }
+      } catch (e) { log('skills trim failed (non-fatal):', e?.message ?? e) }
+    }
 
     if (step === 1) tracker.reset(agent)
     if (step !== 1) return decision                                  // 每轮第一步 = "工作前"
