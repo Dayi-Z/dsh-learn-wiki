@@ -63,12 +63,38 @@ check('★ 完全无关的查询不得判为 hit（hit 会注入整页正文）'
 //
 // 所以这里不假装它通过了：断言它**没有变得更糟**（上限 0.25）。
 // 一旦超线，说明打分在真实语料上进一步退化，必须当场处理而不是继续容忍。
+//
+// ── 补记（2026-09-11）：这条缺陷已被大幅削弱 ──
+//
+// 语料从 15 页涨到 19 页后，本条分数从 0.2141 涨到 **0.2728**，超了当时设的 0.25 上限
+// —— 也就是当时那条注释说的"必须当场处理"的时刻。处理方式是**对真实语料重跑标定**
+// （新脚本 scripts/calibrate-real.mjs，18 条标注查询），结论是：
+//
+//   **单靠阈值救不了**：在真实语料上，最好的负例（Rust borrow checker 0.3737）
+//   比最差的正例（0.2811）还高 —— Gap **-0.093**。这不是"阈值没调好"，
+//   是打分本身分不开。
+//
+//   根因是**分词器没有停用词概念**：中文用字符二元组，而「的」出现在 15/19 页
+//   （df/n≈0.79）且 tf 很高，却和内容词被同等对待。那条 Rust 查询真正命中的是
+//   「的」(15)、「报错」(4)、「怎么」(4)、「绕过」(2) —— 撑起分数的主要是「的」。
+//
+//   修法是标准的 IR 做法：**出现比例过高的词不携带区分度，不计入覆盖度**。
+//   扫了一遍 maxDfRatio（见 lib/config.js 的注释），0.2 是第一个让 Gap 转正的取值：
+//     正例最低 0.2446 / 负例最高 0.1969 → Gap **+0.048**
+//   且正例 top1 正确率与基线**完全相同**（12/13）——没有为了分离开而牺牲命中。
+//
+//   本条断言随之改写：它现在要守的不是"别超过 0.25"，而是**不许再回到 hit**。
+//   下面那个数字是实测值，改动打分后必须重新量，不是拍出来的。
 const qKnown = scoreQuery(corpus, '如何配置 kubernetes sidecar 注入策略')
 const tKnown = triage(qKnown)
-console.log('\n已知缺陷用例: bucket=' + tKnown.bucket + ' best=' + tKnown.best + '（上限 0.25）')
-check('已知缺陷未恶化：通用词重叠查询的分数仍在记录的上限内',
-  tKnown.best < 0.25,
-  'best=' + tKnown.best + ' bucket=' + tKnown.bucket + '  （若 >0.25 说明真实语料上的打分退化，需重跑标定）')
+const KNOWN_RECORDED = 0.1394   // 2026-09-11 在 19 页真实语料上实测
+console.log('\n已知缺陷用例: bucket=' + tKnown.bucket + ' best=' + tKnown.best + '（记录值 ' + KNOWN_RECORDED + '）')
+check('★ 已知缺陷不再注入整页：通用词重叠查询不得判成 hit',
+  tKnown.bucket !== 'hit',
+  'bucket=' + tKnown.bucket + ' best=' + tKnown.best + '  （判成 hit 会把无关页面正文注进提示词）')
+check('已知缺陷分数未回升（记录值 ' + KNOWN_RECORDED + '，容差 0.05）',
+  tKnown.best <= KNOWN_RECORDED + 0.05,
+  'best=' + tKnown.best + '  （回升说明 maxDfRatio 的过滤失效或语料分布变了，需重跑 calibrate-real.mjs）')
 
 // 中文二元组分词确实产出 token
 const zhOnly = scoreQuery(corpus, '数据库崩溃恢复')
