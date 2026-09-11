@@ -262,17 +262,21 @@ window.__ModuleLoader__.load({
       // 而那正是"没对齐"看起来最刺眼的地方。
       '.lw-pend{box-sizing:border-box;width:calc(100% - 2 * var(--dsh-composer-side-clearance,16px));',
       'max-width:var(--dsh-composer-card-max-width,780px);',
-      'display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0 auto 6px;padding:4px 8px;',
+      // 观感：**一行，不换行**。换行会让它变成两行灰块压在输入框上，很难看。
+      // 文字过长就截断 —— 这条子只需要传达"有几个数字"，不负责展示长句。
+      'display:flex;align-items:center;gap:6px;flex-wrap:nowrap;margin:0 auto 6px;padding:3px 8px;',
       'border-radius:8px;background:var(--dsw-alias-interactive-bg-hover);',
       'color:var(--dsw-alias-label-secondary,var(--lw-fg2));',
       // 字号走 DSH 的阶梯，不手写 —— 手写的结果就是 11/11.5/12/12.5/13 混在一个面板里
       'font:var(--dsw-font-xxs-12,12px/18px system-ui,sans-serif)}',
       '.lw-pend-txt{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
       '.lw-pend b{color:var(--dsw-alias-label-primary,var(--lw-fg));font-variant-numeric:tabular-nums;font-weight:600}',
-      // 计数本身是可点的入口：看着像文字，但键盘可达、有指针、悬停变色。
-      '.lw-pend-chip{flex:none;padding:0;margin:0;border:0;background:none;color:inherit;cursor:pointer;',
-      'font:inherit;text-decoration:underline;text-decoration-style:dotted;text-underline-offset:3px}',
-      '.lw-pend-chip:hover{color:var(--dsw-alias-label-primary,var(--lw-fg))}',
+      // 计数是可点的入口，但**不要**做成虚线下划线 —— 一行里两条虚线下划线很吵。
+      // 做成安静的小胶囊：平时看着就是文字，悬停才显出可点。
+      '.lw-pend-chip{flex:none;padding:0 6px;margin:0;border:0;border-radius:6px;background:none;',
+      'color:inherit;cursor:pointer;font:inherit;white-space:nowrap}',
+      '.lw-pend-chip:hover{background:var(--dsw-alias-interactive-bg-hover);',
+      'color:var(--dsw-alias-label-primary,var(--lw-fg))}',
       // Button(sm)：display/gap/height/padding/圆角/字号全部照 DSH 的 kz6gm 模块。
       // 分拣页签复用同一个类 —— 两处外观必须是同一套，否则又是一个"没同步"。
       '.lw-btn{flex:none;box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;',
@@ -298,8 +302,19 @@ window.__ModuleLoader__.load({
       '.lw-tri-head{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}',
       '.lw-tri-title{flex:1;min-width:0;font-weight:600;color:var(--lw-fg);word-break:break-word}',
       '.lw-tri-meta{flex:none;font:var(--dsw-font-xxxs-11,11px/16px system-ui,sans-serif);color:var(--lw-fg4);font-variant-numeric:tabular-nums}',
-      '.lw-tri-tag{flex:none;padding:0 6px;border-radius:6px;background:var(--lw-line-soft);',
-      'font:var(--dsw-font-xxxs-11,11px/16px system-ui,sans-serif);color:var(--lw-fg3)}',
+      // 两个来源的标签**配色要分得开**：已拒绝是"这条知识被判错"，回收站是
+      // "这条暂存页不想要了" —— 语义不同，长得一样就得每次去读文字。
+      '.lw-tri-tag{flex:none;padding:1px 7px;border-radius:6px;background:var(--lw-line-soft);',
+      'font:var(--dsw-font-xxxs-11,11px/16px system-ui,sans-serif);color:var(--lw-fg3);white-space:nowrap}',
+      '.lw-tri-tag.rej{background:color-mix(in srgb,var(--lw-warn) 18%,transparent);color:var(--lw-warn)}',
+      // 原因块：它是**决策输入**，所以不做成小字备注，而是卡片里第二显眼的东西。
+      '.lw-tri-why{margin:8px 0 0;padding:7px 9px;border-radius:8px;border-left:3px solid var(--lw-warn);',
+      'background:var(--lw-line-soft);color:var(--lw-fg2);word-break:break-word}',
+      '.lw-tri-why .k{display:block;margin-bottom:3px;color:var(--lw-warn);',
+      'font:var(--dsw-font-xxxs-11,11px/16px system-ui,sans-serif);letter-spacing:.02em}',
+      // 没记录原因时必须**看得出来是"没记录"**，而不是让人以为这页本来就没理由。
+      '.lw-tri-why.none{border-left-color:var(--lw-line);color:var(--lw-fg4)}',
+      '.lw-tri-why.none .k{color:var(--lw-fg4)}',
       '.lw-tri-exc{margin:6px 0 0;color:var(--lw-fg2);white-space:pre-wrap;word-break:break-word;',
       'max-height:9em;overflow:hidden}',
       '.lw-tri-full{margin:6px 0 0;color:var(--lw-fg2);white-space:pre-wrap;word-break:break-word}',
@@ -1537,7 +1552,9 @@ window.__ModuleLoader__.load({
                 var isBusy = busy === it.rel
                 return h('div', { key: it.rel, className: 'lw-tri-card' },
                   h('div', { className: 'lw-tri-head' },
-                    h('span', { className: 'lw-tri-tag' }, it.from === '.trash' ? '回收站' : '已拒绝'),
+                    h('span', {
+                      className: 'lw-tri-tag ' + (it.from === '.rejected' ? 'rej' : 'tra'),
+                    }, it.from === '.trash' ? '回收站' : '已拒绝'),
                     h('span', { className: 'lw-tri-title' }, it.title || it.id),
                     h('span', { className: 'lw-tri-meta' },
                       it.id
@@ -1546,6 +1563,19 @@ window.__ModuleLoader__.load({
                       + ' · ' + it.sources + ' 来源 · ' + it.bodyChars + ' 字'
                       + (it.batch ? ' · 批次 ' + String(it.batch).replace(/^staged-/, '') : ''))
                   ),
+                  // ── 为什么它在这 ──
+                  //
+                  // 解析不出来就**如实说没记录**，绝不编一个。编出来的理由会被
+                  // 后来的人当成证据 —— 那比"没有理由"危险得多。
+                  it.reason
+                    ? h('div', { className: 'lw-tri-why' },
+                        h('span', { className: 'k' },
+                          (it.reason.kind === 'TRASHED' ? '回收原因' : '拒绝原因')
+                          + (it.reason.date ? ' · ' + it.reason.date : '')),
+                        it.reason.text)
+                    : h('div', { className: 'lw-tri-why none' },
+                        h('span', { className: 'k' }, '未记录原因'),
+                        '移进来时没写理由。约定见 ' + it.from + '/README.md —— 没有理由，就只能靠读全文决定要不要它。'),
                   h('div', { className: 'lw-tri-exc' }, b && b.body != null ? b.body : it.excerpt),
                   h('div', { className: 'lw-tri-acts' },
                     h('button', { type: 'button', className: 'lw-tri-more', onClick: function () { onToggle(it.rel) } },

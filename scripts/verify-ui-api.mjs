@@ -163,6 +163,29 @@ if (payload) {
   }
 }
 
+// ── 原因解析（纯函数，直接测）──
+//
+// 这是 .rejected/README.md 里那条**约定**的执行者："移进来的文件必须在文件头
+// 补一段 > REJECTED: 说明为什么被拒，包括具体证据、来源 gap、日期"。
+// 在此之前约定只活在文档里、代码完全没实现，所以界面上看不到原因。
+{
+  const { parseTriageReason } = await import('../lib/wiki.js')
+  const one = parseTriageReason('> REJECTED: 2026-09-11 —— 撞名误报，与本项目无关。\n\n正文')
+  check('解析单行原因（含日期）',
+    one && one.kind === 'REJECTED' && one.date === '2026-09-11' && one.text === '撞名误报，与本项目无关。',
+    JSON.stringify(one))
+  const multi = parseTriageReason('> TRASHED: 2026-09-11 —— 泛化的第三方教训，与本项目无关。\n> 正文讲的是 mcp-toolbox 的时序问题。\n\n正文开始')
+  check('★ 跨行原因要合并成一段（约定里原因常分两行写）',
+    multi && multi.kind === 'TRASHED' && /mcp-toolbox/.test(multi.text) && !/正文开始/.test(multi.text),
+    JSON.stringify(multi && multi.text))
+  check('★ 没有标记就返回 null —— 不许编一个理由',
+    parseTriageReason('就是一段普通正文，没有任何标记') === null)
+  check('正文里出现同名字样但不在行首，不算原因',
+    parseTriageReason('这句话里提到 REJECTED: 但不是标记行') === null)
+  check('中英文冒号都认',
+    parseTriageReason('> TRASHED： 2026-01-01 — 测试').kind === 'TRASHED')
+}
+
 // ── 分拣接口（读路径走真实 wiki，写路径在下面的临时仓库上测）──
 {
   const t = await call('/learn-wiki/api/triage')
@@ -180,6 +203,12 @@ if (payload) {
       'excerpt 长度 ' + JSON.stringify(tj.items.slice(0, 3).map(x => x.excerpt.length)))
     check('★ 列表**不带全文**（八篇正文每次打开面板都传一遍是浪费）',
       tj.items.every(x => x.full === undefined && x.body === undefined))
+    check('★ 列表带 reason 字段（有就给原因，没有就是 null —— 界面据此显示"未记录"）',
+      tj.items.every(x => 'reason' in x),
+      JSON.stringify(tj.items.slice(0, 3).map(x => x.id + ':' + (x.reason ? x.reason.kind : 'null'))))
+    check('★ 已拒绝的两条都解析出了原因和日期（它们是按约定写的）',
+      tj.items.filter(x => x.from === '.rejected').every(x => x.reason && x.reason.date && x.reason.text),
+      JSON.stringify(tj.items.filter(x => x.from === '.rejected').map(x => x.reason)))
     check('★ README 之类的说明文件不在列表里（否则"分拣完了"是假的）',
       !tj.items.some(x => /readme/i.test(x.rel)),
       JSON.stringify(tj.items.map(x => x.rel).slice(0, 6)))

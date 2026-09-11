@@ -302,13 +302,14 @@ console.log('── 分拣页签 ──')
 const triageFixture = [
   {
     rel: '.trash/staged-20260101-000000/x.md', id: 'trashed-x', title: '回收站里的 X',
-    category: 'lesson', confidence: 0.8, sources: 3, from: '.trash', batch: 'staged-20260101-000000',
+    category: 'lesson', confidence: 0.8, sources: 3, from: '.trash', reason: null, batch: 'staged-20260101-000000',
     bytes: 1200, mtime: '2026-01-01T00:00:00.000Z', bodyChars: 500,
     excerpt: '摘录：这一页讲的是某件已经过时的事。', truncated: true,
   },
   {
     rel: '.rejected/y.md', id: 'rejected-y', title: '被拒绝的 Y',
-    category: 'fact', confidence: 0.6, sources: 1, from: '.rejected', batch: null,
+    category: 'fact', confidence: 0.6, sources: 1, from: '.rejected',
+    reason: { kind: 'REJECTED', date: '2026-09-11', text: '撞名误报，与本项目无关。' }, batch: null,
     bytes: 800, mtime: '2026-01-02T00:00:00.000Z', bodyChars: 300,
     excerpt: '摘录：撞名误报，与本项目无关。', truncated: false,
   },
@@ -332,6 +333,18 @@ const triageFixture = [
     tri.replace(/<[^>]+>/g, '|').slice(0, 90))
   check('空列表时给一句解释而不是一片空白',
     renderToStaticMarkup(h(T, { items: [] })).includes('没有条目'))
+
+  // ── 原因：对应"明确标记拒绝原因 / 回收原因"那条需求 ──
+  check('★ 有记录的原因要显示出来（不是让人把文件打开自己翻）',
+    tri.includes('拒绝原因') && tri.includes('撞名误报，与本项目无关。') && tri.includes('2026-09-11'),
+    '拒绝原因 + 日期 + 正文，三段都要在')
+  check('★ 没记录原因时**如实说没记录**，绝不编一个',
+    tri.includes('未记录原因'),
+    '编出来的理由会被后来的人当成证据 —— 那比没有理由危险得多')
+  check('★ 没记录时给出约定文档的位置（否则下一个人还是不知道该写）',
+    tri.includes('.trash/README.md'))
+  check('★ 两个来源的标签配色不同（语义不同；长得一样就得每次去读文字）',
+    tri.includes('lw-tri-tag rej') && tri.includes('lw-tri-tag tra'))
 }
 
 // ── 3. 退化路径 ──
