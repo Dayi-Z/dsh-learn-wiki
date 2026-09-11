@@ -84,14 +84,23 @@ export function buildDocument({ view, markup, pluginCss, tokens, tokenNote, mode
   ].join('\n')
 }
 
-export const VIEWS = [
-  { id: 'capabilities-tools', title: '能力 · 工具', tab: 'capabilities', seg: 'tools' },
-  { id: 'capabilities-skills', title: '能力 · 技能', tab: 'capabilities', seg: 'skills' },
-  { id: 'knowledge', title: '知识', tab: 'knowledge' },
-  { id: 'supply', title: '补料', tab: 'supply' },
-  // 待办提示条不是面板的一个页签（它挂在输入框上方），所以单独渲染。
-  // 目的：让"这条子到底长什么样"不再是只能靠脑补的事。
-  { id: 'pending-bar', title: '输入框上方的待办提示条', component: 'PendingBar' },
+/** 分拣页签的夹具。用真实的目录形态：回收站有批次子目录，已拒绝是散文件。 */
+export const TRIAGE_FIXTURE = [
+  {
+    rel: '.trash/staged-2026-09-10T15-53-04-985Z/opencode-zen-api-endpoint.md',
+    id: 'opencode-zen-api-endpoint', title: 'OpenCode Zen 的 base endpoint',
+    category: 'fact', confidence: 0.7, sources: 2, from: '.trash',
+    batch: 'staged-2026-09-10T15-53-04-985Z', bytes: 1100,
+    mtime: '2026-09-10T15:53:04.985Z', bodyChars: 611, truncated: true,
+    excerpt: 'OpenCode Zen 的 base endpoint 为 https://opencode.ai/zen/v1，文档见 …（夹具摘录；真实内容由 /api/triage 提供）',
+  },
+  {
+    rel: '.rejected/llm-wiki-v120-client-crash-upgrade.md',
+    id: 'llm-wiki-v120-client-crash-upgrade', title: 'llm-wiki v1.2.0 客户端崩溃与升级',
+    category: 'fact', confidence: 0.5, sources: 1, from: '.rejected',
+    batch: null, bytes: 2389, mtime: '2026-09-11T02:10:00.000Z', bodyChars: 2389, truncated: true,
+    excerpt: '> REJECTED: 2026-09-11 —— 撞名误报，与本项目无关。（夹具摘录）',
+  },
 ]
 
 /**
@@ -112,3 +121,17 @@ export const PENDING_FIXTURE = {
   trash: 10,
   rejected: 2,
 }
+
+export const VIEWS = [
+  { id: 'capabilities-tools', title: '能力 · 工具', tab: 'capabilities', seg: 'tools' },
+  { id: 'capabilities-skills', title: '能力 · 技能', tab: 'capabilities', seg: 'skills' },
+  { id: 'knowledge', title: '知识', tab: 'knowledge' },
+  { id: 'supply', title: '补料', tab: 'supply' },
+  // 待办提示条不是面板的一个页签（它挂在输入框上方），所以单独渲染。
+  // 目的：让"这条子到底长什么样"不再是只能靠脑补的事。
+  { id: 'pending-bar', title: '输入框上方的待办提示条', component: 'PendingBar', props: { pending: PENDING_FIXTURE } },
+  // 分拣页签读的是 /api/triage 而不是 /api/state，塞不进 PanelBody 那条受控路径，
+  // 只能自己喂夹具（受控模式与 PendingBar 同一套惯例）。
+  { id: 'triage', title: '分拣（回收站 / 已拒绝）', component: 'TriageTab', props: { items: TRIAGE_FIXTURE } },
+]
+

@@ -29,7 +29,7 @@ import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { readFile } from 'node:fs/promises'
 import { loadHarness, makeState, PLUGIN_ROOT } from './lib/ui-harness.mjs'
-import { buildDocument, loadTokens, VIEWS, PENDING_FIXTURE } from './lib/ui-preview.mjs'
+import { buildDocument, loadTokens, VIEWS } from './lib/ui-preview.mjs'
 
 const argv = process.argv.slice(2)
 const argOf = (name) => { const i = argv.indexOf(name); return i >= 0 ? argv[i + 1] : null }
@@ -99,7 +99,7 @@ for (const view of picked) {
   // （它真实的宽度来自 composer 那一行）。窄容器是**近似**，这一点不许含糊。
   const markup = view.component
     ? H.renderToStaticMarkup(H.h('div', { style: { padding: '28px 24px', maxWidth: '780px' } },
-        H.h(M.__components[view.component], { pending: PENDING_FIXTURE })))
+        H.h(M.__components[view.component], view.props || {})))
     : H.renderToStaticMarkup(H.h(M.__components.Workbench, {
         state, initialTab: view.tab, initialSeg: view.seg, onClose: () => {},
       }))

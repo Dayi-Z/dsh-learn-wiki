@@ -46,6 +46,7 @@ window.__ModuleLoader__.load({
 
     var API = '/learn-wiki/api/state'
     var PAGE_API = '/learn-wiki/api/page'
+    var TRIAGE_API = '/learn-wiki/api/triage'
 
     /** DSH 图标；没有原语时返回 null（不画假的代替品）。 */
     function Ico(name, size) {
@@ -268,22 +269,45 @@ window.__ModuleLoader__.load({
       'font:var(--dsw-font-xxs-12,12px/18px system-ui,sans-serif)}',
       '.lw-pend-txt{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
       '.lw-pend b{color:var(--dsw-alias-label-primary,var(--lw-fg));font-variant-numeric:tabular-nums;font-weight:600}',
-      // Button(sm)：display/gap/height/padding/圆角/字号全部照 DSH 的 kz6gm 模块
-      '.lw-pend-btn{flex:none;box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;',
+      // 计数本身是可点的入口：看着像文字，但键盘可达、有指针、悬停变色。
+      '.lw-pend-chip{flex:none;padding:0;margin:0;border:0;background:none;color:inherit;cursor:pointer;',
+      'font:inherit;text-decoration:underline;text-decoration-style:dotted;text-underline-offset:3px}',
+      '.lw-pend-chip:hover{color:var(--dsw-alias-label-primary,var(--lw-fg))}',
+      // Button(sm)：display/gap/height/padding/圆角/字号全部照 DSH 的 kz6gm 模块。
+      // 分拣页签复用同一个类 —— 两处外观必须是同一套，否则又是一个"没同步"。
+      '.lw-btn{flex:none;box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;',
       'gap:4px;height:28px;padding:0 10px;border-radius:14px;cursor:pointer;',
       'border:1px solid var(--dsw-alias-border-l2);background:transparent;',
       'color:var(--dsw-alias-label-primary,var(--lw-fg));',
       'font:var(--dsw-font-xxs-12,12px/18px system-ui,sans-serif)}',
       // ghost/outline 的悬停与按下
-      '.lw-pend-btn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}',
-      '.lw-pend-btn:active:not(:disabled){background:var(--dsw-alias-interactive-bg-active)}',
+      '.lw-btn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}',
+      '.lw-btn:active:not(:disabled){background:var(--dsw-alias-interactive-bg-active)}',
       // primary：配对使用 fill / foreground，绝不自己配白字
-      '.lw-pend-btn.primary{border-color:transparent;',
+      '.lw-btn.primary{border-color:transparent;',
       'background:var(--dsw-alias-button-primary-fill,var(--lw-brand));',
       'color:var(--dsw-alias-label-primary-foreground,#fff)}',
-      '.lw-pend-btn.primary:hover:not(:disabled){background:var(--dsw-alias-button-primary-hover,var(--lw-brand))}',
-      '.lw-pend-btn.primary:active:not(:disabled){background:var(--dsw-alias-button-primary-hover,var(--lw-brand))}',
-      '.lw-pend-btn:disabled{cursor:not-allowed;opacity:.4}',
+      '.lw-btn.primary:hover:not(:disabled){background:var(--dsw-alias-button-primary-hover,var(--lw-brand))}',
+      '.lw-btn.primary:active:not(:disabled){background:var(--dsw-alias-button-primary-hover,var(--lw-brand))}',
+      '.lw-btn:disabled{cursor:not-allowed;opacity:.4}',
+      // ── 分拣 ──
+      // 用卡片而不是表格：这一页的决策输入是**正文**（"这页我还要不要"），
+      // 而正文塞不进表格列。表头在这里只会挤掉真正要看的东西。
+      '.lw-tri{display:flex;flex-direction:column;gap:8px}',
+      '.lw-tri-card{border:1px solid var(--lw-line);border-radius:10px;padding:10px 12px;background:var(--lw-raise)}',
+      '.lw-tri-head{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}',
+      '.lw-tri-title{flex:1;min-width:0;font-weight:600;color:var(--lw-fg);word-break:break-word}',
+      '.lw-tri-meta{flex:none;font:var(--dsw-font-xxxs-11,11px/16px system-ui,sans-serif);color:var(--lw-fg4);font-variant-numeric:tabular-nums}',
+      '.lw-tri-tag{flex:none;padding:0 6px;border-radius:6px;background:var(--lw-line-soft);',
+      'font:var(--dsw-font-xxxs-11,11px/16px system-ui,sans-serif);color:var(--lw-fg3)}',
+      '.lw-tri-exc{margin:6px 0 0;color:var(--lw-fg2);white-space:pre-wrap;word-break:break-word;',
+      'max-height:9em;overflow:hidden}',
+      '.lw-tri-full{margin:6px 0 0;color:var(--lw-fg2);white-space:pre-wrap;word-break:break-word}',
+      '.lw-tri-acts{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:8px}',
+      '.lw-tri-acts .lw-tri-ask{color:var(--lw-warn)}',
+      '.lw-tri-more{flex:none;padding:0;border:0;background:none;color:var(--lw-fg3);cursor:pointer;font:inherit;',
+      'text-decoration:underline;text-decoration-style:dotted;text-underline-offset:3px}',
+      '.lw-hint{font:var(--dsw-font-xxs-12,12px/18px system-ui,sans-serif);line-height:1.6;color:var(--lw-fg3);padding:0 2px 10px}',
     ].join('')
 
     var styled = false
@@ -1202,6 +1226,7 @@ window.__ModuleLoader__.load({
     var TABS = [
       { id: 'capabilities', label: '能力' },
       { id: 'knowledge', label: '知识' },
+      { id: 'triage', label: '分拣' },
       { id: 'supply', label: '补料' },
     ]
 
@@ -1219,8 +1244,18 @@ window.__ModuleLoader__.load({
         return '已固化 ' + num((k.committed || []).length)
           + ' · 暂存 ' + num((k.staged || []).length)
       }
-      var g = s.gaps || {}
-      return '缺口 ' + num(g.total) + ' · 挣扎 ' + num((s.struggles || {}).total)
+      if (tab === 'triage') {
+        var tr = s.triage || {}
+        return '回收站 ' + num(tr.trash) + ' · 已拒绝 ' + num(tr.rejected)
+      }
+      if (tab === 'supply') {
+        var g = s.gaps || {}
+        return '缺口 ' + num(g.total) + ' · 挣扎 ' + num((s.struggles || {}).total)
+      }
+      // ★ 未知页签返回空，**不要**落到某个默认分支上。
+      //   原来这里直接 return 补料的数字，于是新加的"分拣"页签头上会写着
+      //   "缺口 8 · 挣扎 50" —— 一个自信地显示错误数字的界面比空着更糟。
+      return ''
     }
 
     function PanelBody(props) {
@@ -1292,7 +1327,8 @@ window.__ModuleLoader__.load({
               : tab === 'capabilities'
                 ? h(CapabilitiesTab, { state: state, onChanged: load, initialSeg: props.initialSeg })
                 : tab === 'knowledge' ? h(KnowledgeTab, { state: state, onChanged: load })
-                  : h(SupplyTab, { state: state })
+                  : tab === 'triage' ? h(TriageTab, { onChanged: load })
+                    : h(SupplyTab, { state: state })
         )
       )
     }
@@ -1370,6 +1406,175 @@ window.__ModuleLoader__.load({
         initialTab: props.initialTab,
         initialSeg: props.initialSeg,
       })))
+    }
+
+    /**
+     * 分拣页签：回收站 / 已拒绝里的条目，逐条决定「恢复」还是「永久删除」。
+     *
+     * 这一页是补一个**我自己造出来的死胡同**：待办条上写着"12 个待分拣"，
+     * 但面板里原先根本没有能处理它们的界面 —— 数字说有事，点进去没事。
+     *
+     * 两条设计铁律：
+     *   1. 恢复**回 staged/**，绝不直接进 pages/。两段式的第一段是防投毒闸门，
+     *      "从回收站捞回来"不该成为绕过它的后门。
+     *   2. 永久删除是**不可逆**的，所以两段确认；服务端另有一道 confirm 守卫
+     *      （前端这道是给人看的，服务端那道才是真的闸）。
+     */
+    function TriageTab(props) {
+      ensureStyle()
+      // 受控模式（离线渲染/截图）直接给 items，与 PanelBody / PendingBar 同一套惯例。
+      var controlled = !!(props && props.items)
+      var listState = useState(controlled ? props.items : null)
+      var items = controlled ? props.items : listState[0]
+      var setItems = listState[1]
+      var errState = useState(null)
+      var err = errState[0], setErr = errState[1]
+      var segState = useState('all')
+      var seg = segState[0], setSeg = segState[1]
+      var openState = useState(null)
+      var open = openState[0], setOpen = openState[1]
+      var bodyState = useState({})
+      var bodies = bodyState[0], setBodies = bodyState[1]
+      var askState = useState(null)
+      var ask = askState[0], setAsk = askState[1]
+      var busyState = useState(null)
+      var busy = busyState[0], setBusy = busyState[1]
+      var msgState = useState(null)
+      var msg = msgState[0], setMsg = msgState[1]
+
+      var load = useCallback(function () {
+        if (controlled) return
+        getJson(TRIAGE_API).then(function (r) {
+          if (r.j && r.j.ok) { setItems(r.j.items || []); setErr(null) }
+          else setErr(r.error || (r.j && r.j.error) || ('HTTP ' + r.status))
+        }).catch(function (e) { setErr(String((e && e.message) || e)) })
+      }, [controlled])
+      useEffect(function () { load() }, [load])
+
+      var loadBody = function (rel) {
+        setBodies(function (b) {
+          if (b[rel]) return b
+          var n = Object.assign({}, b); n[rel] = { loading: true }; return n
+        })
+        getJson(TRIAGE_API + '?rel=' + encodeURIComponent(rel)).then(function (r) {
+          setBodies(function (b) {
+            var n = Object.assign({}, b)
+            n[rel] = (r.j && r.j.ok) ? { body: r.j.body } : { error: r.error || (r.j && r.j.error) || ('HTTP ' + r.status) }
+            return n
+          })
+        }).catch(function (e) {
+          setBodies(function (b) {
+            var n = Object.assign({}, b); n[rel] = { error: String((e && e.message) || e) }; return n
+          })
+        })
+      }
+
+      var onToggle = function (rel) {
+        var next = open === rel ? null : rel
+        setOpen(next)
+        if (next) loadBody(next)
+      }
+
+      var act = function (rel, action) {
+        setBusy(rel); setMsg(null)
+        // 不做乐观移除：恢复/删除都是本地文件操作，快到不需要它；
+        // 而"先把它从列表里拿掉、失败再放回去"会让人看到条目闪一下，
+        // 那种闪动本身就在传递"可能没成"的不确定感。
+        var payload = action === 'discard' ? { rel: rel, action: action, confirm: true } : { rel: rel, action: action }
+        post(TRIAGE_API, payload).then(function (r) {
+          setBusy(null); setAsk(null)
+          if (r.j && r.j.ok) {
+            setMsg({
+              ok: true,
+              text: action === 'restore'
+                ? '已恢复到 staged/ —— 它仍要过一遍固化闸门才会进召回。'
+                : '已永久删除。',
+            })
+            setItems(function (l) { return (l || []).filter(function (x) { return x.rel !== rel }) })
+            props.onChanged && props.onChanged()
+          } else {
+            setMsg({ ok: false, text: (r.error || (r.j && r.j.error) || ('HTTP ' + r.status)) })
+          }
+        }).catch(function (e) {
+          setBusy(null); setAsk(null)
+          setMsg({ ok: false, text: String((e && e.message) || e) })
+        })
+      }
+
+      if (err) return h('div', { className: 'lw-msg err' }, '读不到分拣列表：' + err + '　（/learn-wiki/api/triage）')
+      if (!items) return h('div', { className: 'lw-empty' }, '读取中…')
+
+      var inTrash = items.filter(function (x) { return x.from === '.trash' }).length
+      var inRej = items.filter(function (x) { return x.from === '.rejected' }).length
+      var SEGS = [
+        { id: 'all', label: '全部', n: items.length },
+        { id: '.trash', label: '回收站', n: inTrash },
+        { id: '.rejected', label: '已拒绝', n: inRej },
+      ]
+      var shown = seg === 'all' ? items : items.filter(function (x) { return x.from === seg })
+
+      return h('div', null,
+        h('div', { className: 'lw-seg', role: 'tablist', 'aria-label': '分拣筛选' },
+          SEGS.map(function (s) {
+            return h(Chip, {
+              key: s.id, active: seg === s.id, role: 'tab', 'aria-selected': seg === s.id,
+              onClick: function () { setSeg(s.id) },
+            }, s.label + ' ' + s.n)
+          })
+        ),
+        // 说清楚"恢复"到底恢复到哪里。用户以为是"还原成已固化"，
+        // 实际是"回到待固化"—— 不写清楚，他会以为恢复之后立刻就生效了。
+        h('div', { className: 'lw-hint' },
+          '恢复 = 放回 staged/，仍要过固化闸门才会参与召回；永久删除不可撤销。'),
+        msg ? h('div', { className: 'lw-msg ' + (msg.ok ? 'ok' : 'err') }, msg.text) : null,
+        shown.length === 0
+          ? h('div', { className: 'lw-empty' }, '这一类里没有条目。')
+          : h('div', { className: 'lw-tri' },
+              shown.map(function (it) {
+                var isOpen = open === it.rel
+                var b = bodies[it.rel]
+                var confirming = ask === it.rel
+                var isBusy = busy === it.rel
+                return h('div', { key: it.rel, className: 'lw-tri-card' },
+                  h('div', { className: 'lw-tri-head' },
+                    h('span', { className: 'lw-tri-tag' }, it.from === '.trash' ? '回收站' : '已拒绝'),
+                    h('span', { className: 'lw-tri-title' }, it.title || it.id),
+                    h('span', { className: 'lw-tri-meta' },
+                      it.id
+                      + (it.category ? ' · ' + it.category : '')
+                      + (it.confidence != null ? ' · ' + it.confidence : '')
+                      + ' · ' + it.sources + ' 来源 · ' + it.bodyChars + ' 字'
+                      + (it.batch ? ' · 批次 ' + String(it.batch).replace(/^staged-/, '') : ''))
+                  ),
+                  h('div', { className: 'lw-tri-exc' }, b && b.body != null ? b.body : it.excerpt),
+                  h('div', { className: 'lw-tri-acts' },
+                    h('button', { type: 'button', className: 'lw-tri-more', onClick: function () { onToggle(it.rel) } },
+                      isOpen ? '收起全文' : '读全文'),
+                    h('button', {
+                      type: 'button', className: 'lw-btn', disabled: isBusy,
+                      onClick: function () { act(it.rel, 'restore') },
+                    }, '恢复'),
+                    confirming
+                      ? h('button', {
+                          type: 'button', className: 'lw-btn primary', disabled: isBusy,
+                          onClick: function () { act(it.rel, 'discard') },
+                        }, isBusy ? '删除中…' : '确认永久删除')
+                      : h('button', {
+                          type: 'button', className: 'lw-btn',
+                          onClick: function () { setAsk(it.rel) },
+                        }, '永久删除'),
+                    confirming
+                      ? h('button', {
+                          type: 'button', className: 'lw-btn', disabled: isBusy,
+                          onClick: function () { setAsk(null) },
+                        }, '取消')
+                      : null,
+                    confirming ? h('span', { className: 'lw-tri-ask' }, '删了就找不回来了。') : null
+                  )
+                )
+              })
+            )
+      )
     }
 
     // ── 待办：谁在等、怎么把面板打开 ─────────────────────────────────────
@@ -1546,9 +1751,26 @@ window.__ModuleLoader__.load({
         step(0)
       }
 
-      var parts = []
-      if (d.stagedTotal > 0) parts.push(h('span', { key: 's' }, h('b', null, String(d.stagedTotal)), ' 页待固化'))
-      if (triage > 0) parts.push(h('span', { key: 't' }, h('b', null, String(triage)), ' 个待分拣'))
+      // 两个计数各自**可点**，各自开对应的页签。
+      //
+      // 之前只有一个笼统的「处理」按固定顺序挑一个页签 —— 而那意味着
+      // "12 个待分拣"旁边那个按钮会把你送到知识页签，而那里根本没有分拣界面。
+      // 数字和它点开的东西必须对得上，否则这个条子就是在骗人。
+      var chips = []
+      if (d.stagedTotal > 0) {
+        chips.push(h('button', {
+          key: 's', type: 'button', className: 'lw-pend-chip',
+          title: '打开「知识」页签，逐页看再决定固化',
+          onClick: function () { benchStore.set({ open: true, tab: 'knowledge' }) },
+        }, h('b', null, String(d.stagedTotal)), ' 页待固化'))
+      }
+      if (triage > 0) {
+        chips.push(h('button', {
+          key: 't', type: 'button', className: 'lw-pend-chip',
+          title: '打开「分拣」页签，恢复或永久删除',
+          onClick: function () { benchStore.set({ open: true, tab: 'triage' }) },
+        }, h('b', null, String(triage)), ' 个待分拣'))
+      }
 
       return h('div', {
         // ★ lw-root 不能省：整套 --lw-* 变量定义在 .lw-root 上而不是 :root，
@@ -1560,26 +1782,22 @@ window.__ModuleLoader__.load({
         h('span', { className: 'lw-pend-txt' },
           ask
             ? '确认固化这 ' + ready + ' 页？固化后它们立刻参与自动召回。'
-            : (note ? note : parts.reduce(function (acc, x) { return acc.concat(acc.length ? [' · '] : [], [x]) }, []))
+            : (note ? note : chips.reduce(function (acc, x) { return acc.concat(acc.length ? [' · '] : [], [x]) }, []))
         ),
         ask ? h('button', {
-          type: 'button', className: 'lw-pend-btn primary', disabled: working,
+          type: 'button', className: 'lw-btn primary', disabled: working,
           onClick: commitAll,
         }, working ? '固化中…' : '确认固化') : null,
         ask ? h('button', {
-          type: 'button', className: 'lw-pend-btn', disabled: working,
+          type: 'button', className: 'lw-btn', disabled: working,
           onClick: function () { setAsk(false) },
         }, '取消') : null,
         !ask && ready > 0 ? h('button', {
-          type: 'button', className: 'lw-pend-btn primary',
+          type: 'button', className: 'lw-btn primary',
           onClick: function () { setAsk(true); setNote(null) },
         }, '全部固化') : null,
-        !ask ? h('button', {
-          type: 'button', className: 'lw-pend-btn',
-          onClick: function () { benchStore.set({ open: true, tab: 'knowledge' }) },
-        }, '处理') : null,
         !ask && note ? h('button', {
-          type: 'button', className: 'lw-pend-btn',
+          type: 'button', className: 'lw-btn',
           onClick: function () { setNote(null) },
         }, '知道了') : null
       )
@@ -1640,7 +1858,7 @@ window.__ModuleLoader__.load({
      * 多一个字段对宿主是惰性的。
      */
     exports.__components = {
-      PanelBody, Workbench, FooterEntry, PendingBar,
+      PanelBody, Workbench, FooterEntry, PendingBar, TriageTab,
       CapabilitiesTab, ToolsSection, SkillsSection,
       KnowledgeTab, SupplyTab, PageDetail,
     }

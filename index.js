@@ -13,7 +13,10 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { createUserMessage as hostCreateUserMessage } from '@deepseek-ai/dsh-llm'
 import { loadConfig, DEFAULTS } from './lib/config.js'
-import { loadPages, ensureRepo, savePage, commitReadiness, readStagedBrief, countTriage } from './lib/wiki.js'
+import {
+  loadPages, ensureRepo, savePage, commitReadiness, readStagedBrief, countTriage,
+  listTriage, readTriageBody, restoreTriage, discardTriage,
+} from './lib/wiki.js'
 import { readFile, writeFile, unlink } from 'node:fs/promises'
 import { join } from 'node:path'
 import { buildCorpus, scoreQuery, triage, recallable, looksLikeGap } from './lib/recall.js'
@@ -425,6 +428,43 @@ export function apply(ctx, pluginConfig = {}) {
           return
         }
 
+        // ── 分拣：回收站 / 已拒绝 ──
+        //
+        // 这两类条目原先**没有任何界面**，只能靠读文件分拣。而它们恰恰是最需要
+        // 看内容才能决定的东西，所以列表带摘录、全文按需另取（与知识页签同一个
+        // 取舍：列表不带正文，八篇正文几十 KB 每次轮询都传一遍是浪费）。
+        if (url.pathname === '/learn-wiki/api/triage' && req.method === 'GET') {
+          const one = url.searchParams.get('rel')
+          if (one) {
+            const r0 = await readTriageBody(cfg.wikiRoot, one)
+            send(r0.ok ? 200 : 400, r0)
+            return
+          }
+          send(200, { ok: true, ts: new Date().toISOString(), items: await listTriage(cfg.wikiRoot) })
+          return
+        }
+
+        if (url.pathname === '/learn-wiki/api/triage' && req.method === 'POST') {
+          const body = await readBody()
+          const action = body && body.action
+          const rel = body && body.rel
+          if (action !== 'restore' && action !== 'discard') {
+            send(400, { ok: false, error: 'action 必须是 restore 或 discard' }); return
+          }
+          // ★ 永久删除是**不可逆**的，必须显式确认。
+          //   前端的两段式是给人看的，服务端这一道才是真的闸 ——
+          //   它同时挡住误触和"别的调用方"。
+          if (action === 'discard' && body.confirm !== true) {
+            send(400, { ok: false, error: '永久删除需要 confirm:true（不可逆）' }); return
+          }
+          const r0 = action === 'restore'
+            ? await restoreTriage(cfg.wikiRoot, rel)
+            : await discardTriage(cfg.wikiRoot, rel)
+          log('ui: ' + action + ' ' + String(rel) + (r0.ok ? ' 成功' : ' 失败 ' + r0.error))
+          send(r0.ok ? 200 : 400, r0)
+          return
+        }
+
         if (url.pathname !== '/learn-wiki/api/state') { send(404, { ok: false, error: 'not found' }); return }
 
         const { pages } = await loadPages(cfg.wikiRoot)
@@ -455,6 +495,7 @@ export function apply(ctx, pluginConfig = {}) {
         const counts = {}
         for (const p of committed) counts[p.cls] = (counts[p.cls] ?? 0) + 1
 
+        const triageCounts = await countTriage(cfg.wikiRoot)
         const gaps = await readGaps(cfg.wikiRoot)
         const gapCounts = {}
         for (const g of gaps) gapCounts[g.status] = (gapCounts[g.status] ?? 0) + 1
@@ -499,6 +540,9 @@ export function apply(ctx, pluginConfig = {}) {
           skills: await skills.snapshot(),
           knowledge: { committed, staged, counts, threshold: { hit: cfg.hitThreshold, weak: cfg.weakThreshold } },
           gaps: { counts: gapCounts, total: gaps.length, recent: gaps.slice(-12).map(g => ({ query: String(g.query).slice(0, 90), status: g.status })) },
+          // 分拣计数顺手带上（两次 readdir，可以忽略）。面板打开时 /api/state 每 8 秒
+          // 轮询一次，界面据此在页签头上写字。
+          triage: { ...triageCounts, total: triageCounts.trash + triageCounts.rejected },
           struggles: {
             total: struggles.length,
             counts: sigCounts,
@@ -530,7 +574,7 @@ export function apply(ctx, pluginConfig = {}) {
     // 前端拿到 index.html（**HTTP 200**，content-type: text/html）。
     // 这个比 404 更难查：状态码是成功的。
     const dispose = ctx.webServer.register({ kind: 'prefix', path: '/learn-wiki', handler })
-    log('ui: /learn-wiki 已注册（prefix，覆盖 api/state|page|commit|capabilities|pending）')
+    log('ui: /learn-wiki 已注册（prefix，覆盖 api/state|page|commit|capabilities|pending|triage）')
     return () => { try { dispose() } catch {} }
   }, 'dsh-learn-wiki: ui route')
 

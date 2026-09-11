@@ -47,7 +47,7 @@ const matchesPrefix = (prefix, pathname) => pathname === prefix || pathname.star
 const API_PATHS = [
   '/learn-wiki/api/state', '/learn-wiki/api/page',
   '/learn-wiki/api/commit', '/learn-wiki/api/capabilities',
-  '/learn-wiki/api/pending',
+  '/learn-wiki/api/pending', '/learn-wiki/api/triage',
 ]
 const regd = route && route.kind === 'prefix' ? route.path : null
 const unmatched = API_PATHS.filter(p => !(regd !== null && matchesPrefix(regd, p)))
@@ -163,6 +163,39 @@ if (payload) {
   }
 }
 
+// ── 分拣接口（读路径走真实 wiki，写路径在下面的临时仓库上测）──
+{
+  const t = await call('/learn-wiki/api/triage')
+  check('triage 返回 200', t.code === 200, 'code=' + t.code)
+  let tj = null
+  try { tj = JSON.parse(t.body) } catch (e) { check('triage 响应是合法 JSON', false, e.message) }
+  if (tj) {
+    check('triage 响应是合法 JSON', true)
+    check('triage ok=true 且有 items', tj.ok === true && Array.isArray(tj.items))
+    check('★ 每个条目都带 rel 与 from（写操作与筛选都靠它们）',
+      tj.items.every(x => typeof x.rel === 'string' && (x.from === '.trash' || x.from === '.rejected')),
+      JSON.stringify(tj.items.slice(0, 2).map(x => x.rel)))
+    check('★ 每个条目都带摘录（不看内容无从判断"这页还要不要"）',
+      tj.items.every(x => typeof x.excerpt === 'string'),
+      'excerpt 长度 ' + JSON.stringify(tj.items.slice(0, 3).map(x => x.excerpt.length)))
+    check('★ 列表**不带全文**（八篇正文每次打开面板都传一遍是浪费）',
+      tj.items.every(x => x.full === undefined && x.body === undefined))
+    check('★ README 之类的说明文件不在列表里（否则"分拣完了"是假的）',
+      !tj.items.some(x => /readme/i.test(x.rel)),
+      JSON.stringify(tj.items.map(x => x.rel).slice(0, 6)))
+
+    // 路径穿越：写操作会移动和删除文件，而 rel 来自请求体
+    const attacks = ['../../pages/lesson/edit-requires-reading-first-mechanism.md',
+      '.trash/../../pages/fact/schema-e86e06.md', '/etc/passwd', '.trashfoo/x.md']
+    let leaked = []
+    for (const a of attacks) {
+      const rr = await call('/learn-wiki/api/triage?rel=' + encodeURIComponent(a))
+      if (rr.code === 200) leaked.push(a)
+    }
+    check('★ 路径穿越被挡住（读单条也不许越界）', leaked.length === 0, leaked.join(', '))
+  }
+}
+
 const nf = await call('/learn-wiki/nope')
 check('未知路径返回 404', nf.code === 404, 'code=' + nf.code)
 
@@ -222,6 +255,58 @@ check('★ 无 sources 被闸门拒绝（两段式的第二道闸）', c2.code =
 
 const c3 = await postCall('/learn-wiki/api/commit', { id: '根本不存在' })
 check('commit 未知 id 返回 404', c3.code === 404, 'code=' + c3.code)
+
+// ── 分拣写路径（同样只在临时仓库上）──
+{
+  const { mkdir, writeFile } = await import('node:fs/promises')
+  const { existsSync } = await import('node:fs')
+  const mkPage = (id, title) => '---\nid: ' + id + '\ntitle: ' + title
+    + '\ncategory: lesson\nconfidence: 0.8\nstatus: staged\nsources:\n  - https://x\n---\n\n正文 ' + id + '\n'
+  await mkdir(join(T, '.trash', 'staged-20260101-000000'), { recursive: true })
+  await mkdir(join(T, '.rejected'), { recursive: true })
+  await writeFile(join(T, '.trash', 'staged-20260101-000000', 'a.md'), mkPage('tri-a', '回收站 A'), 'utf8')
+  await writeFile(join(T, '.trash', 'b.md'), mkPage('tri-b', '回收站 B'), 'utf8')
+  await writeFile(join(T, '.rejected', 'c.md'), mkPage('tri-c', '被拒绝 C'), 'utf8')
+  await writeFile(join(T, '.rejected', 'README.md'), '# 说明\n', 'utf8')
+
+  const list = JSON.parse((await call('/learn-wiki/api/triage')).body)
+  check('分拣列表按 rel 精确列出（含子目录里的条目）',
+    list.items.length === 3 && list.items.some(x => x.rel === '.trash/staged-20260101-000000/a.md'),
+    JSON.stringify(list.items.map(x => x.rel)))
+
+  const one = JSON.parse((await call('/learn-wiki/api/triage?rel=' + encodeURIComponent('.trash/b.md'))).body)
+  check('按 rel 取全文', one.ok === true && /正文 tri-b/.test(one.body), String(one.body).slice(0, 60))
+
+  // ★ confirm 守卫：这是**服务端**的闸，不是前端那个两段式
+  const noConfirm = await postCall('/learn-wiki/api/triage', { rel: '.trash/b.md', action: 'discard' })
+  check('★ 不带 confirm 的永久删除被拒（不可逆操作的服务端闸）',
+    noConfirm.code === 400 && /confirm/.test(String(noConfirm.body)),
+    'code=' + noConfirm.code + ' ' + String(noConfirm.body).slice(0, 90))
+  check('★ 被拒之后文件**还在**（守卫真的拦住了，不是先删后报错）',
+    existsSync(join(T, '.trash', 'b.md')))
+
+  // 恢复 → 必须进 staged，绝不进 pages
+  const rest = await postCall('/learn-wiki/api/triage', { rel: '.trash/b.md', action: 'restore' })
+  check('恢复成功', rest.code === 200 && JSON.parse(rest.body).ok === true, String(rest.body).slice(0, 120))
+  check('★ 恢复落到 staged/ 而不是 pages/（两段式的第一段不许被绕过）',
+    existsSync(join(T, 'staged', 'b.md')) && !existsSync(join(T, 'pages', 'lesson', 'b.md')))
+  const after = JSON.parse((await call('/learn-wiki/api/triage')).body)
+  check('恢复后它从分拣列表里消失', !after.items.some(x => x.rel === '.trash/b.md'),
+    JSON.stringify(after.items.map(x => x.rel)))
+
+  // 真正的删除
+  const del = await postCall('/learn-wiki/api/triage', { rel: '.rejected/c.md', action: 'discard', confirm: true })
+  check('带 confirm 的永久删除成功', del.code === 200 && JSON.parse(del.body).ok === true, String(del.body).slice(0, 120))
+  check('文件确实没了', !existsSync(join(T, '.rejected', 'c.md')))
+
+  // 路径穿越走写路径也不行
+  const trav = await postCall('/learn-wiki/api/triage', { rel: '../pages/lesson/x.md', action: 'discard', confirm: true })
+  check('★ 写路径的路径穿越也被挡住', trav.code === 400, 'code=' + trav.code + ' ' + String(trav.body).slice(0, 90))
+
+  // 非法 action
+  const badAct = await postCall('/learn-wiki/api/triage', { rel: '.trash/staged-20260101-000000/a.md', action: '删掉' })
+  check('未知 action 返回 400', badAct.code === 400, 'code=' + badAct.code)
+}
 
 const c4 = await postCall('/learn-wiki/api/capabilities', { enabled: true, explicitOnly: ['workflow', 'ralph'] })
 check('★ 能力包配置写回成功', c4.code === 200 && JSON.parse(c4.body).ok === true, String(c4.body).slice(0, 140))

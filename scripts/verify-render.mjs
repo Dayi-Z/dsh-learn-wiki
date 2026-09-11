@@ -271,7 +271,14 @@ check('待办总数：缺字段不炸', pendingTotal({ stagedTotal: 3 }) === 3)
   check('★ 第一屏是「全部固化」，且**没有**直接出现「确认固化」（一键写多文件必须先问一句）',
     bar.includes('全部固化') && !bar.includes('确认固化'),
     JSON.stringify([bar.includes('全部固化'), bar.includes('确认固化')]))
-  check('有「处理」入口（点开完整面板）', bar.includes('处理'))
+  // ★ 两个计数各自可点、各自开对应的页签。
+  //   之前只有一个笼统的「处理」按固定顺序挑页签 —— 那意味着"12 个待分拣"
+  //   旁边的按钮会把你送到知识页签，而那里根本没有分拣界面。
+  //   数字和它点开的东西必须对得上。
+  check('★ 两个计数都是可点的入口（不是纯文字）',
+    count(bar, 'lw-pend-chip') === 2, 'chip=' + count(bar, 'lw-pend-chip'))
+  check('两个计数分别写着各自要去的地方',
+    /title="打开「知识」页签/.test(bar) && /title="打开「分拣」页签/.test(bar))
   check('用 role=status + aria-live 播报（读屏用户也该知道有东西在等）',
     bar.includes('role="status"') && bar.includes('aria-live="polite"'))
 
@@ -282,6 +289,49 @@ check('待办总数：缺字段不炸', pendingTotal({ stagedTotal: 3 }) === 3)
   check('★ 没有「已通过闸门」的页时不出现「全部固化」',
     !onlyTriage.includes('全部固化') && onlyTriage.includes('待分拣'),
     onlyTriage.replace(/<[^>]+>/g, '|').slice(0, 120))
+}
+
+// ── 2.6 分拣页签 ──
+//
+// 这一页是补一个"数字说有事、点进去没事"的死胡同：待办条写着 N 个待分拣，
+// 而面板里原先根本没有能处理它们的界面。所以测的重点是**决策输入齐不齐**
+// 和**不可逆操作有没有门槛**。
+console.log('')
+console.log('── 分拣页签 ──')
+
+const triageFixture = [
+  {
+    rel: '.trash/staged-20260101-000000/x.md', id: 'trashed-x', title: '回收站里的 X',
+    category: 'lesson', confidence: 0.8, sources: 3, from: '.trash', batch: 'staged-20260101-000000',
+    bytes: 1200, mtime: '2026-01-01T00:00:00.000Z', bodyChars: 500,
+    excerpt: '摘录：这一页讲的是某件已经过时的事。', truncated: true,
+  },
+  {
+    rel: '.rejected/y.md', id: 'rejected-y', title: '被拒绝的 Y',
+    category: 'fact', confidence: 0.6, sources: 1, from: '.rejected', batch: null,
+    bytes: 800, mtime: '2026-01-02T00:00:00.000Z', bodyChars: 300,
+    excerpt: '摘录：撞名误报，与本项目无关。', truncated: false,
+  },
+]
+{
+  const T = M.__components.TriageTab
+  check('导出了 TriageTab（否则这一页根本无法被断言）', typeof T === 'function')
+  const tri = renderToStaticMarkup(h(T, { items: triageFixture }))
+  check('两类的条目都画出来了', tri.includes('回收站里的 X') && tri.includes('被拒绝的 Y'))
+  check('来源标签区分回收站与已拒绝', tri.includes('回收站') && tri.includes('已拒绝'))
+  check('★ 每条都带摘录（不看内容无从判断"这页还要不要"）',
+    tri.includes('摘录：这一页讲的是某件已经过时的事。'))
+  check('★ 第一屏是「永久删除」而**不是**「确认永久删除」（不可逆操作必须两段）',
+    tri.includes('永久删除') && !tri.includes('确认永久删除'),
+    JSON.stringify([tri.includes('永久删除'), tri.includes('确认永久删除')]))
+  check('有「恢复」入口', tri.includes('恢复'))
+  check('★ 写清楚"恢复"是回到 staged 而不是直接生效（否则用户以为恢复完就参与召回了）',
+    tri.includes('staged/') && tri.includes('固化闸门'))
+  check('分段导航带两类的计数',
+    tri.includes('全部 2') && tri.includes('回收站 1') && tri.includes('已拒绝 1'),
+    tri.replace(/<[^>]+>/g, '|').slice(0, 90))
+  check('空列表时给一句解释而不是一片空白',
+    renderToStaticMarkup(h(T, { items: [] })).includes('没有条目'))
 }
 
 // ── 3. 退化路径 ──
@@ -302,6 +352,7 @@ for (const [label, Component, props] of [
   ['补料页签', M2.__components.SupplyTab, { state }],
   ['底栏入口', M2.__components.FooterEntry, { state }],
   ['待办提示条', M2.__components.PendingBar, { pending: PENDING_FIXTURE }],
+  ['分拣页签', M2.__components.TriageTab, { items: triageFixture }],
 ]) {
   try {
     const html = renderToStaticMarkup(h(Component, props))
