@@ -24,6 +24,7 @@ import { appendGap, runAcquisition, readGaps } from './lib/acquire.js'
 import { createLlm } from './lib/llm.js'
 import { createLogger } from './lib/log.js'
 import { applySkillTrim, agentKeyOf } from './lib/skills-trim.js'
+import { looksLikeCorrection, correctionRecord } from './lib/correction.js'
 import { createStruggleTracker, recordStruggle, symptomQuery, readStruggles } from './lib/struggle.js'
 import { createCapabilityManager, loadCatalogSnapshot } from './lib/capabilities.js'
 // updateUsage 而不是 loadUsage+saveUsage：证据账的读-改-写必须整段串行，
@@ -742,6 +743,39 @@ export function apply(ctx, pluginConfig = {}) {
           log('skills: 已按 ' + agentKeyOf(agent) + ' 裁剪目录（去掉 ' + t.removed + ' 条）')
         }
       } catch (e) { log('skills trim failed (non-fatal):', e?.message ?? e) }
+    }
+
+    // ── 第三个触发器：被纠正 ──
+    //
+    // 补的是另外两个触发器共同的盲区：**工具全都成功、但答案是错的**。
+    // 那一刻没有报错、挣扎检测器一声不响，而用户说"不对" —— 这是唯一能看见它的信号。
+    //
+    // 动作**不是**补料：答案来自用户，联网去搜用户刚说过的话是最糟的反应。
+    // 动作是两件：把上一轮注入过的那条知识标成嫌疑，并把用户原话记下来。
+    if (step === 1 && !isSubagent(agent)) {
+      try {
+        const c = looksLikeCorrection(queryFrom(messages))
+        if (c.yes) {
+          const prev = agent.id ? turnInjections.get(agent.id) : null
+          // ★ 只在**上一轮工具层看起来没问题**时才归因。
+          //   如果上一轮已经因为挣扎记过嫌疑，再记一次就是同一件事数两遍 ——
+          //   而那会让"撞了几次"这类阈值整体失真。
+          //   反过来，"没挣扎却被纠正"才是这里唯一的新信息。
+          const ids = prev && !prev.struggled ? [...prev.pages] : []
+          if (ids.length) {
+            void updateUsage(cfg.wikiRoot, u => recordSuspect(u, ids))
+              .then(() => log('correction: 用户纠正，记嫌疑 ' + ids.join(',')))
+              .catch((e) => log('correction suspect failed (non-fatal):', e?.message ?? e))
+          }
+          void recordStruggle(cfg.wikiRoot, correctionRecord({
+            agent, text: queryFrom(messages), markers: c.markers, corrected: ids,
+            origin: 'agent', depth: delegationDepth(agent),
+          }))
+          if (agent.id) turnInjections.delete(agent.id)
+          log('correction: 检测到纠正（' + c.markers.join(',') + '）'
+            + (ids.length ? ' -> 上一轮注入的 ' + ids.length + ' 页记嫌疑' : '（上一轮无可归因的注入）'))
+        }
+      } catch (e) { log('correction check failed (non-fatal):', e?.message ?? e) }
     }
 
     if (step === 1) tracker.reset(agent)

@@ -107,7 +107,11 @@ tracker.reset(agent)
 const afterReset = tracker.observe(agent, mk(9), res)
 check('reset 后窗口清空，不立即再触发', afterReset.length === 0, JSON.stringify(afterReset.map(s => s.type)))
 
-check('全部信号类型都已列入 SIGNAL_TYPES', SIGNAL_TYPES.length === 4, SIGNAL_TYPES.join(','))
+// 五种：四种来自**工具层观测**（失败/重复/churn/循环报错），
+// 第五种 user-correction 来自**用户**（工具没报错但答案错了）。
+// 数字写死是故意的：加信号类型必须来这里改一次，提醒你别让 wiki_struggle、
+// 界面、wiki_sessions 那几个读它的地方悄悄漏掉新类型。
+check('全部信号类型都已列入 SIGNAL_TYPES', SIGNAL_TYPES.length === 5 && SIGNAL_TYPES.includes('user-correction'), SIGNAL_TYPES.join(','))
 
 // ── 失败判据：harness 错误 vs 命令失败 ──
 //

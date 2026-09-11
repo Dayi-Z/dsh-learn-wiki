@@ -52,6 +52,7 @@
     "verify:merge": "node scripts/verify-merge.mjs",
     "verify:metrics": "node scripts/verify-metrics.mjs",
     "verify:skill-trim": "node scripts/verify-skill-trim.mjs",
+    "verify:correction": "node scripts/verify-correction.mjs",
     "ui:probe": "node scripts/ui-probe.mjs",
     "ui:snapshot": "node scripts/ui-snapshot.mjs"
   },
