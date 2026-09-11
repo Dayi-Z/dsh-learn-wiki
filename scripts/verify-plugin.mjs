@@ -176,8 +176,8 @@ catch (e) { check('apply(ctx) 执行成功', false, e.message) }
 // 没有这个能力）和"多注册一个"（没想清楚就加工具，每个请求都多付 token）。
 // 代价是加工具时必须来这里改一次 —— 那正是我们希望被提醒的时刻。
 const names = registered.map(t => t.name).sort()
-check('注册了 9 个工具', registered.length === 9, names.join(', '))
-check('工具名符合预期', JSON.stringify(names) === JSON.stringify(['find_tools', 'wiki_acquire', 'wiki_commit', 'wiki_harvest', 'wiki_learn', 'wiki_recall', 'wiki_review', 'wiki_sessions', 'wiki_struggle']), names.join(', '))
+check('注册了 10 个工具', registered.length === 10, names.join(', '))
+check('工具名符合预期', JSON.stringify(names) === JSON.stringify(['find_tools', 'wiki_acquire', 'wiki_commit', 'wiki_harvest', 'wiki_learn', 'wiki_lint', 'wiki_recall', 'wiki_review', 'wiki_sessions', 'wiki_struggle']), names.join(', '))
 check('每个工具都有 output 声明', registered.every(t => t.output && t.output.schema && typeof t.output.render === 'function'))
 check('每个工具都有 execute', registered.every(t => typeof t.execute === 'function'))
 
