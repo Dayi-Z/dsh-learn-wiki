@@ -25,7 +25,33 @@ const mod = await import('../index.js')
 mod.apply(ctxLike, { wikiRoot: ROOT })
 
 check('声明了 webServer 依赖', mod.inject.includes('webServer'), JSON.stringify(mod.inject))
-check('注册了 UI 路由', route !== null && route.path === '/learn-wiki/api/state', JSON.stringify(route && { kind: route.kind, path: route.path }))
+// ★ 这条断言是补上来的：曾经注册成 kind:'exact' + '/learn-wiki/api/state'，
+// 于是 /api/page 根本进不到 handler，前端拿到 404 HTML 才炸出 JSON 解析错误。
+// 旧测试直接调 route.handler，绕过了路由匹配，所以完全测不出来——
+// 又一次印证：自建的测试替身永远比真实边界松。
+check('★ 路由用 prefix 注册（否则 /api/page 根本到不了 handler）',
+  route !== null && route.kind === 'prefix' && route.path === '/learn-wiki',
+  JSON.stringify(route && { kind: route.kind, path: route.path }))
+
+// ★ 光断言 kind/path 的**值**还不够——紧接着就又栽了一次：
+// path 写成 '/learn-wiki/'（多个尾斜杠），kind 和 path 看上去都对，
+// 但宿主的匹配规则是
+//     if (pathname !== prefix && !pathname.startsWith(prefix + '/')) continue
+// （照抄 dsh-host-webserver/lib/index.js:199），它拿 prefix 和 prefix+'/' 去比，
+// 于是 '/learn-wiki/' 会去找 '/learn-wiki//api/state' —— 永远不匹配。
+// 请求落到 SPA 兜底路由，前端拿到 index.html，而且是 **HTTP 200**，
+// 比 404 更难查（状态码是成功的，只有 content-type 露馅）。
+//
+// 所以这里照抄真实匹配规则，逐条验证**每条 API 路径都进得来**。
+const matchesPrefix = (prefix, pathname) => pathname === prefix || pathname.startsWith(prefix + '/')
+const API_PATHS = [
+  '/learn-wiki/api/state', '/learn-wiki/api/page',
+  '/learn-wiki/api/commit', '/learn-wiki/api/capabilities',
+]
+const regd = route && route.kind === 'prefix' ? route.path : null
+const unmatched = API_PATHS.filter(p => !(regd !== null && matchesPrefix(regd, p)))
+check('★ 按宿主的真实匹配规则，四条 API 路径全部可达',
+  unmatched.length === 0, 'prefix=' + JSON.stringify(regd) + ' 匹配不上的: ' + JSON.stringify(unmatched))
 
 // 造一个假的 req/res 来调用 handler
 function call(pathname) {
@@ -52,6 +78,27 @@ if (payload) {
   check('含 knowledge 段', !!payload.knowledge, Object.keys(payload.knowledge || {}).join(','))
   check('含 gaps 段', !!payload.gaps)
   check('含 struggles 段', !!payload.struggles)
+  check('含 skills 段', !!payload.skills, Object.keys(payload.skills || {}).join(','))
+  check('★ 读不到技能注册表时如实报告，而不是假装是空的',
+    payload.skills?.available === false && typeof payload.skills?.reason === 'string',
+    'available=' + payload.skills?.available + ' reason=' + payload.skills?.reason)
+  // 工具目录要能直接喂给界面：每个工具都得有「用途」和「族」。
+  // 没有这两样，那一页就只剩一串光秃秃的名字——用户看不出它是干什么的。
+  const capItems = payload.capabilities?.catalog?.items ?? []
+  check('★ 工具目录非空（否则界面上的用途/族无从显示）', capItems.length > 0, 'n=' + capItems.length)
+  check('★ 每个工具都带用途',
+    capItems.length > 0 && capItems.every(i => typeof i.purpose === 'string' && i.purpose.length > 0),
+    JSON.stringify(capItems.slice(0, 2).map(i => i.name + ' → ' + String(i.purpose).slice(0, 46))))
+  check('★ 每个工具都带命名族（DSH 不暴露归属插件，这里给的是从名字推出的族，是事实但不是归属声明）',
+    capItems.length > 0 && capItems.every(i => typeof i.family === 'string'),
+    JSON.stringify(capItems.slice(0, 4).map(i => i.name + ' → ' + JSON.stringify(i.family))))
+  check('用途被截断到表格放得下', capItems.every(i => i.purpose.length <= 151),
+    'max=' + Math.max(...capItems.map(i => i.purpose.length)))
+
+  check('★ 能力包给了 kept/denied 两笔账',
+    typeof payload.capabilities?.totals?.kept === 'number'
+    && typeof payload.capabilities?.totals?.deniedTokens === 'number',
+    JSON.stringify(payload.capabilities?.totals))
   check('★ 知识页带证据分类', (payload.knowledge.committed || []).every(p => typeof p.cls === 'string'),
     JSON.stringify((payload.knowledge.committed || []).slice(0, 2).map(p => p.id + ':' + p.cls)))
   check('★ 证据分布已统计', payload.knowledge.counts && Object.keys(payload.knowledge.counts).length > 0,
@@ -143,6 +190,62 @@ check('★ 配置确实落进 wiki.config.json', JSON.stringify(saved.capabiliti
 
 const c5 = await postCall('/learn-wiki/api/capabilities', { bad: 1 })
 check('非法载荷返回 400', c5.code === 400, 'code=' + c5.code)
+
+// ── ★ 桌面载体（app://）形态的 POST ──
+//
+// 桌面端的 req 是 fetch Request 的**垫片**：它的 on() 只处理 close / aborted，
+// 对 'data' 和 'end' **静默返回**，body 只能通过异步迭代读
+// （dsh-host-desktop-carrier/lib/index.js:272）。
+//
+// 上面那个 postCall 的 mock 实现了 data/end —— 比真实边界宽松，
+// 所以它测不出「handler 永远不 resolve」这个 bug。实测就这么漏过去了：
+// 点任意一个工具前的方框 → Failed to fetch。
+function postCallDesktop(pathname, body) {
+  const chunks = body === undefined ? [] : [Buffer.from(JSON.stringify(body), 'utf8')]
+  const req = {
+    url: pathname,
+    method: 'POST',
+    headers: {},
+    destroy: () => {},
+    // 只"支持" close/aborted —— 其余事件名静默吞掉，和垫片一模一样
+    on: () => req,
+    once: () => req,
+    async *[Symbol.asyncIterator]() { for (const c of chunks) yield c },
+  }
+  return new Promise((resolve) => {
+    let code = 0
+    const res = { writeHead: (c) => { code = c }, end: (b) => { clearTimeout(timer); resolve({ code, body: b }) } }
+    const timer = setTimeout(
+      () => resolve({ code: -1, body: '(超时：handler 未响应 —— 很可能在等一个永远不会触发的事件)' }),
+      3000)
+    Promise.resolve(route.handler(req, res)).catch((e) => { clearTimeout(timer); resolve({ code: -2, body: String(e && e.message) }) })
+  })
+}
+
+// 同样的写路径，但走**桌面垫片**形态的 req
+const d1 = await postCallDesktop('/learn-wiki/api/capabilities', { enabled: true, explicitOnly: ['workflow'] })
+check('★ 桌面载体（app://）下 POST 也能被处理（body 走异步迭代，不是 data/end 事件）',
+  d1.code === 200 && JSON.parse(d1.body).ok === true,
+  'code=' + d1.code + ' ' + String(d1.body).slice(0, 140))
+const d2 = await postCallDesktop('/learn-wiki/api/commit', { id: 'no-source' })
+check('★ 桌面载体下 commit 的闸门照常生效',
+  d2.code === 409 && JSON.parse(d2.body).ok === false,
+  'code=' + d2.code + ' ' + String(d2.body).slice(0, 140))
+
+// ── 读路由：单页正文（"行是活的"靠它） ──
+const pg = await call('/learn-wiki/api/page?id=writable')
+const pgj = JSON.parse(pg.body)
+check('★ 单页接口把正文带回来', pg.code === 200 && pgj.ok === true && pgj.body.includes('内容'),
+  'code=' + pg.code + ' body=' + JSON.stringify(pgj.body || '').slice(0, 80))
+check('单页接口带 sources 与 usage',
+  Array.isArray(pgj.sources) && pgj.sources.length === 1 && typeof pgj.usage?.hits === 'number',
+  'sources=' + JSON.stringify(pgj.sources) + ' usage=' + JSON.stringify(pgj.usage))
+
+const pgNoId = await call('/learn-wiki/api/page')
+check('单页接口缺 id 返回 400', pgNoId.code === 400, 'code=' + pgNoId.code)
+
+const pgMissing = await call('/learn-wiki/api/page?id=根本没有这页')
+check('单页接口未知 id 返回 404', pgMissing.code === 404, 'code=' + pgMissing.code)
 
 await rm(T, { recursive: true, force: true })
 
