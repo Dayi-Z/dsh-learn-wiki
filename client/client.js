@@ -1356,6 +1356,7 @@ window.__ModuleLoader__.load({
           subs.push(f)
           return function () { var i = subs.indexOf(f); if (i >= 0) subs.splice(i, 1) }
         },
+        count: function () { return subs.length },
       }
     }
 
@@ -1390,11 +1391,23 @@ window.__ModuleLoader__.load({
         if (typeof document === 'undefined' || document.visibilityState !== 'hidden') loadPending()
       }, 30000)
     }
+    /**
+     * 没人订阅了就停表。
+     *
+     * 为什么必须停：客户端插件是会被**重新装配**的（改配置就会），而模块级
+     * 定时器不会随组件卸载消失 —— 每重载一次就多一个每 30 秒拉一次的定时器。
+     * 攒几次就变成"明明没人看，磁盘却一直在响"，而且这类泄漏不报错、只累积。
+     */
+    function stopPendingIfIdle() {
+      if (pendingStore.count() > 0) return
+      if (pendingTimer) { clearInterval(pendingTimer); pendingTimer = null }
+    }
     function usePending() {
       var s = useState(pendingStore.get())
       useEffect(function () {
         startPendingPolling()
-        return pendingStore.subscribe(function () { s[1](pendingStore.get()) })
+        var un = pendingStore.subscribe(function () { s[1](pendingStore.get()) })
+        return function () { un(); stopPendingIfIdle() }
       }, [])
       return s[0]
     }
