@@ -257,11 +257,14 @@ export function apply(ctx, pluginConfig = {}) {
 
   // 落盘日志：桌面版里插件 stdout 基本不可见，诊断只能靠文件
   const log = createLogger(baseRoot)
+  // 同步档：只在**重路径的阶段边界**用。默认的异步写盘在原生崩溃时会丢，
+  // 而宿主崩过三次、每次都只剩 crashpad 一行 —— 没有这档就等于没有证据。
+  const trace = createLogger(baseRoot, { sync: true })
 
   // ── 工具注册 ──
   ctx.effect(() => {
     // 传 getCfg 而不是快照：每次工具调用都重读配置，wiki.config.json 热生效
-    const dispose = registerTools(ctx, { getCfg, llm, caps, log })
+    const dispose = registerTools(ctx, { getCfg, llm, caps, log, trace })
     return () => { try { dispose() } catch { /* noop */ } }
   }, 'dsh-learn-wiki: tools')
 
