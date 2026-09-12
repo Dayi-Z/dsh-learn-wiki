@@ -161,6 +161,36 @@ check('新页 status=staged（不参与召回）', /status:\s*staged/.test(newPa
 const noAgent = await tool.execute({}, {})
 check('没有 agent 上下文时如实报错，而不是抛异常', noAgent.ok === false && /agent/.test(noAgent.error ?? ''), noAgent.error)
 
+// ── 落盘函数本身：工具与界面按钮共用这一份 ──
+//
+// 它被抽出来的理由就是"只能有一份"：按钮和工具各写一遍判重，迟早会漂成
+// "按钮出来的页和工具出来的页不一样"，而那种故障极难发现。
+// 上面那条端到端走的是工具；这里直接测函数，补上端到端覆盖不到的一种情形：
+// **同一次返回里两条标题相同**的条目。
+console.log('')
+console.log('=== stageHarvestItems（工具与按钮共用的那一份）===')
+{
+  const { stageHarvestItems } = await import('../lib/harvest.js')
+  const r1 = await stageHarvestItems({
+    wikiRoot: ROOT,
+    items: [
+      { title: '重复标题', category: 'fact', confidence: 0.5, tags: [], sources: ['a'], body: '第一份' },
+      { title: '重复标题', category: 'fact', confidence: 0.5, tags: [], sources: ['b'], body: '第二份' },
+      { title: '另一个标题', category: 'fact', confidence: 0.5, tags: [], sources: ['c'], body: '第三份' },
+    ],
+  })
+  check('★ 同一次返回里标题相同的两条，只写第一份（边写边登记，不是只跟旧文件比）',
+    r1.written.length === 2 && r1.duplicates.length === 1, JSON.stringify({ w: r1.written.map(x => x.title), d: r1.duplicates.map(x => x.title) }))
+  check('写出来的一律是 staged', r1.written.every(x => String(x.path).includes('staged')), JSON.stringify(r1.written.map(x => x.path)))
+  const r2 = await stageHarvestItems({ wikiRoot: ROOT, items: [{ title: '重复标题', category: 'fact', confidence: 0.5, tags: [], sources: [], body: '再来一次' }] })
+  check('★ 第二次调用同样被挡住（不是只在同一批内判重）',
+    r2.written.length === 0 && r2.duplicates.length === 1, JSON.stringify(r2.duplicates))
+  const r3 = await stageHarvestItems({ wikiRoot: ROOT, items: [] })
+  check('空输入返回空结果而不是抛异常', r3.written.length === 0 && r3.duplicates.length === 0)
+  const r4 = await stageHarvestItems({ wikiRoot: ROOT, items: null })
+  check('null 输入也不抛', r4.written.length === 0)
+}
+
 await rm(ROOT, { recursive: true, force: true })
 console.log('')
 if (failures === 0) console.log('ALL PASS — 会话提炼可用，且不把自己的注入物当成人的话')
