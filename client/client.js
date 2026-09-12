@@ -228,9 +228,36 @@ window.__ModuleLoader__.load({
       '.lw-fill{height:100%;border-radius:99px;background:var(--lw-brand);opacity:.85}',
       '.lw-fill.warn{background:var(--lw-warn)}.lw-fill.bad{background:var(--lw-bad)}',
       '.lw-lval{width:58px;flex:none;text-align:right;font-variant-numeric:tabular-nums;color:var(--lw-fg2)}',
-      '.lw-fb{box-sizing:border-box;display:flex;align-items:center;gap:8px;width:100%;padding:6px 10px;',
-      'border:0;border-radius:8px;background:transparent;color:inherit;font:inherit;cursor:pointer;text-align:left}',
+      // ── 侧边栏底栏入口（座位 sidebar.footer.action）──
+      //
+      // 这个座位是个**行**（.pKYZ4q_footerActions{display:flex}），而它的第一个
+      // 使用者 —— cordis 面板 —— 声明了 flex:none;width:100%，一个人就把整行占满。
+      // 宿主那行不换行，于是**任何**第二个使用者都会被挤出容器：实测单元格落在
+      // x=228（容器是 12..228）、宽度被压到 83px、标签折成两行。
+      // 让宿主那行允许换行，两个使用者就各占一行，谁都不必去抢别人的宽度。
+      // 用 :has() 从我的单元格往上选，所以不依赖宿主那个构建期哈希类名；
+      // 轨道态下容器是 width:auto，两个 36px 单元格本来就放得下，不会换行。
+      '*:has(> .lw-fb-cell){flex-wrap:wrap}',
+      // 单元格 = 宿主的 flex 子项。宽态给满，轨道态收成 36px 方格。
+      '.lw-fb-cell{flex:none;width:100%;min-width:0;display:flex}',
+      '.lw-fb-cell-rail{width:36px}',
+      // 按钮照抄设置行（.Ri3YFq_trigger）的度量：高 34px、圆角 12px、
+      // width:calc(100% + 8px) + margin:4px -4px 让它比列宽出 4px（设置行正是这么做的）。
+      // 于是 padding-left 10px 减掉那 4px = 图标左沿距列边 6px —— 与设置行、
+      // 与 cordis 单元格在同一条竖线上（那两处也都是 6px）。
+      '.lw-fb{box-sizing:border-box;display:flex;align-items:center;gap:8px;',
+      'width:calc(100% + 8px);height:34px;margin:4px -4px;padding:6px 2px 6px 10px;',
+      'border:0;border-radius:12px;background:transparent;color:inherit;font:inherit;cursor:pointer;',
+      'text-align:left;overflow:hidden}',
       '.lw-fb:hover{background:var(--lw-hover)}',
+      // 标签必须能自己收窄，否则长文案会把整行顶宽。
+      '.lw-fb-label{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+      // 轨道态（wide=false，56px 栏）：和 cordis 单元格、设置圆钮一样是 36px 圆。
+      // 标签让位 —— 36px 里塞不下字，同样的信息 title 里写着。
+      '.lw-fb-rail{width:36px;height:36px;margin:0;padding:0;border-radius:50%;justify-content:center;gap:0;position:relative}',
+      // 轨道态没有标签，待办数改成一个不越出圆的小点：收起侧边栏不该等于
+      // "看不见有事在等"。数字仍在 title 里。
+      '.lw-fb-rail .lw-fb-dot{position:absolute;top:6px;right:6px;min-width:6px;width:6px;height:6px;padding:0;font-size:0;line-height:0}',
       '.lw-fb-badge{margin-left:auto;font:var(--dsw-font-xxxs-11,11px/16px system-ui,sans-serif);color:var(--lw-fg4);font-variant-numeric:tabular-nums}',
       // ── 待办计数角标 ──
       //
@@ -1795,8 +1822,23 @@ window.__ModuleLoader__.load({
       return (d.stagedTotal || 0) + (d.trash || 0) + (d.rejected || 0)
     }
 
-    function FooterEntry() {
+    /**
+     * 侧边栏底栏入口（座位：sidebar.footer.action）。
+     *
+     * ★ 必须吃 wide。座位契约写得很直白：
+     *   「Whether the sidebar renders wide content (false = 56px rail)」。
+     *   原先这个组件一个 props 都不接，于是侧边栏一收起，它还当着"图标 + 文字"
+     *   的整行宽，而旁边的 cordis 单元格和下面的设置钮都收成了 36px 圆 —— 三者对不齐，
+     *   这就是"标签没有与最下方设置平齐"。
+     *
+     * 外层以前是 display:contents 的壳子。现在换成 Fragment：壳子虽然不产生盒子，
+     * 却是**单元格的 DOM 父节点**，而 CSS 要靠 *:has(> .lw-fb-cell) 从单元格往上
+     * 选到宿主那一行（:has 走的是 DOM 树）。用 Fragment 让单元格的父节点就是宿主。
+     */
+    function FooterEntry(props) {
       ensureStyle()
+      // 老调用点和测试会不传 props —— 缺省按"宽"渲染。
+      var wide = !props || props.wide !== false
       var bench = useBench()
       var open = bench.open
       var p = usePending()
@@ -1808,21 +1850,28 @@ window.__ModuleLoader__.load({
       }, [open])
       var icon = Ico('IconSkillOutline16', 16)
       var n = pendingTotal(p.data)
-      return h('div', { style: { display: 'contents' } },
-        h('button', {
-          type: 'button',
-          className: 'lw-fb',
-          // 标题里把数字说全 —— 光一个角标不解释是什么在等。
-          title: n > 0
-            ? 'learn-wiki —— ' + (p.data.stagedReady || 0) + ' 页可固化 / ' + (p.data.stagedTotal || 0) + ' 页暂存，' + ((p.data.trash || 0) + (p.data.rejected || 0)) + ' 个待分拣'
-            : 'learn-wiki —— 能力 / 知识 / 补料',
-          'aria-expanded': open,
-          onClick: function () { benchStore.set({ open: !open, tab: open ? null : null }) },
-        },
-          icon,
-          h('span', { className: 'lw-fb-label' }, 'learn-wiki'),
-          // 角标只在**真有事**时出现。永远显示一个 0 会训练人忽略它。
-          n > 0 ? h('span', { className: 'lw-fb-dot' }, String(n)) : null,
+      // 标题里把数字说全 —— 光一个角标不解释是什么在等。轨道态下标签不渲染，
+      // 这条 title 就是唯一还能说明"这是什么、有几件事"的地方。
+      var tip = n > 0
+        ? 'learn-wiki —— ' + (p.data.stagedReady || 0) + ' 页可固化 / ' + (p.data.stagedTotal || 0) + ' 页暂存，' + ((p.data.trash || 0) + (p.data.rejected || 0)) + ' 个待分拣'
+        : 'learn-wiki —— 能力 / 知识 / 补料'
+      return h(React.Fragment, null,
+        h('div', { className: 'lw-fb-cell' + (wide ? '' : ' lw-fb-cell-rail') },
+          h('button', {
+            type: 'button',
+            className: 'lw-fb' + (wide ? '' : ' lw-fb-rail'),
+            title: tip,
+            // 轨道态没有可见标签，按钮的**可及名**只能靠这里。
+            'aria-label': 'learn-wiki',
+            'aria-expanded': open,
+            onClick: function () { benchStore.set({ open: !open, tab: open ? null : null }) },
+          },
+            icon,
+            wide ? h('span', { className: 'lw-fb-label' }, 'learn-wiki') : null,
+            // 角标只在**真有事**时出现。永远显示一个 0 会训练人忽略它。
+            // 轨道态只画点不写数字（36px 圆里放不下），数字留在 title 里。
+            n > 0 ? h('span', { className: 'lw-fb-dot' }, wide ? String(n) : '') : null,
+          )
         ),
         open ? h(Workbench, { initialTab: bench.tab || undefined, onClose: function () { benchStore.set({ open: false, tab: null }) } }) : null
       )

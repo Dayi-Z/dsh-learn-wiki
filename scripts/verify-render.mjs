@@ -502,6 +502,45 @@ try {
   check('state 为空对象时不崩', false, String((e && e.message) || e))
 }
 
+// ── 4.5 底栏入口：座位的 wide 契约 ──
+console.log('')
+console.log('── 底栏入口（座位 sidebar.footer.action 的 wide 契约）──')
+// 座位契约原文：「Whether the sidebar renders wide content (false = 56px rail)」。
+// 原先 FooterEntry 一个 props 都不接，于是侧边栏收起时它还当着"图标 + 文字"的整行宽，
+// 而旁边的 cordis 单元格和下面的设置钮都收成了 36px 圆 —— 三者对不齐。
+{
+  const mk = (props) => renderToStaticMarkup(h(C.FooterEntry, props))
+  const wideHtml = mk({ wide: true })
+  const railHtml = mk({ wide: false })
+  const bareHtml = mk({})            // 缺省 / 老调用点
+  const bareUndef = mk(undefined)
+
+  check('wide=true：渲染标签', wideHtml.includes('lw-fb-label') && wideHtml.includes('learn-wiki'))
+  check('★ wide=false：不渲染标签（36px 圆里放不下字）', !railHtml.includes('lw-fb-label'))
+  check('★ wide=false：按钮与单元格都换成轨道类名',
+    railHtml.includes('lw-fb-rail') && railHtml.includes('lw-fb-cell-rail'))
+  check('★ wide=false：没有可见标签，可及名必须由 aria-label 提供',
+    railHtml.includes('aria-label="learn-wiki"'))
+  check('wide=true：不出现轨道类名',
+    !wideHtml.includes('lw-fb-cell-rail') && !wideHtml.includes('"lw-fb lw-fb-rail"'))
+  check('不传 props / 传 undefined 都退化为宽态（测试与老调用点依赖这条）',
+    bareHtml.includes('lw-fb-label') && bareUndef.includes('lw-fb-label'))
+
+  // ★ 结构断言：单元格必须是**宿主那一行的直接子节点**。
+  //   css 的 *:has(> .lw-fb-cell) 走 DOM 树，靠它把宿主的行改成可换行；
+  //   一旦有人把单元格再包一层（比如退回 display:contents 的壳子），
+  //   :has() 就选不到宿主，入口会被挤出那一行。
+  check('★ 渲染根节点就是单元格本身（中间不能再套一层壳）',
+    wideHtml.startsWith('<div class="lw-fb-cell') && railHtml.startsWith('<div class="lw-fb-cell'),
+    '根 = ' + wideHtml.slice(0, 40))
+
+  const css = M.__css
+  check('★ CSS 里有让宿主那行换行的规则（否则第二个使用者会被挤出容器）',
+    css.includes(':has(> .lw-fb-cell)') && css.includes('flex-wrap:wrap'))
+  check('CSS 定义了单元格 / 按钮 / 轨道态三类度量',
+    /.lw-fb-cell\{[^}]*\}/.test(css) && /\.lw-fb\{[^}]*\}/.test(css) && /\.lw-fb-rail\{[^}]*\}/.test(css))
+}
+
 // ── 5. 诚实性 ──
 console.log('')
 console.log('── 诚实性 ──')
