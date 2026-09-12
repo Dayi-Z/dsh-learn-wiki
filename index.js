@@ -657,7 +657,20 @@ export function apply(ctx, pluginConfig = {}) {
           }
         }
 
-        if (url.pathname !== '/learn-wiki/api/state') { send(404, { ok: false, error: 'not found' }); return }
+        // 404 必须说清**它收到了什么**。
+        //
+        // 这个项目已经三次栽在路由匹配上（exact vs prefix、prefix 尾斜杠、路径进不来），
+        // 而每一次前端看到的都只是一句 "not found" —— 于是只能反推，反推又猜错。
+        // 把收到的 method 与 pathname 原样回给前端、同时记进日志：
+        //   * 客户端拿到 "not found（收到 GET /learn-wiki/api/models）" 时，
+        //     一眼就能分清"服务端没有这条路由"和"路由在、判据没命中"；
+        //   * 日志里有它，就不必再靠界面复现。
+        if (url.pathname !== '/learn-wiki/api/state') {
+          const saw = { method: String(req.method ?? ''), pathname: String(url.pathname ?? '') }
+          log('ui: 未匹配的请求 ' + saw.method + ' ' + saw.pathname + '（已注册的路由见上面那行覆盖清单）')
+          send(404, { ok: false, error: 'not found', saw })
+          return
+        }
 
         const { pages } = await loadPages(cfg.wikiRoot)
         const usage = await loadUsage(cfg.wikiRoot)
