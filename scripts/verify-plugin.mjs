@@ -300,9 +300,18 @@ while (Date.now() < dl && injected.length === 0) await new Promise(r => setTimeo
   if (injected.length === 0) {
     // 失败必须能自证。光说"没投递"等于让下一个人重跑一遍才知道卡在哪一环。
     try {
-      const q = await readGaps(ROOT)
-      const last = q.slice(-3).map(g => ({ s: g.status, q: String(g.query).slice(0, 40) }))
+      // ★ 这里**不能**用裸 readGaps：本文件下面（顶层）还有一个
+      //   const { readGaps } = await import(...)，它在模块作用域里遮蔽了这一处，
+      //   于是诊断代码本身抛 "Cannot access 'readGaps' before initialization" ——
+      //   而诊断只在**断言已经失败之后**才跑，所以这个 bug 平时永远看不见，
+      //   真出事时却把"没有投递"换成一个看不懂的 TDZ 报错（实测踩到）。
+      //   直接 inline import，绕开作用域。
+      const q = await (await import('../lib/acquire.js')).readGaps(ROOT)
+      const last = q.slice(-3).map(g => ({ s: g.status, q: String(g.query).slice(0, 60) }))
       console.log('    诊断：等了 40s 仍无投递。gap 总数=' + q.length + ' 最近=' + JSON.stringify(last))
+      const { readStruggles: rs } = await import('../lib/struggle.js')
+      const st = await rs(ROOT, 50)
+      console.log('    诊断：挣扎记录 ' + st.length + ' 条，最近=' + JSON.stringify(st.slice(-3).map(r => (r.signals || []).map(s => s.type))))
     } catch (e) { console.log('    诊断：读 gap 队列也失败了 — ' + e.message) }
   }
   check('★ 补料完成后投递回当前轮（agent.inject 被调用）', injected.length >= 1, 'injected=' + injected.length)

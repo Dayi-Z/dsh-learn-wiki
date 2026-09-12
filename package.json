@@ -56,7 +56,8 @@
     "verify:llm": "node scripts/verify-llm.mjs",
     "verify:compat": "node scripts/verify-compat.mjs",
     "ui:probe": "node scripts/ui-probe.mjs",
-    "ui:snapshot": "node scripts/ui-snapshot.mjs"
+    "ui:snapshot": "node scripts/ui-snapshot.mjs",
+    "verify:gap-race": "node scripts/verify-gap-race.mjs"
   },
   "peerDependencies": {
     "@deepseek-ai/dsh-llm": ">=0.1.0-rc.6 <0.2.0",
@@ -67,7 +68,11 @@
     "@deepseek-ai/dsh-tools": "0.1.0-rc.8"
   },
   "peerDependenciesMeta": {
-    "@deepseek-ai/dsh-llm": { "optional": false },
-    "@deepseek-ai/dsh-tools": { "optional": false }
+    "@deepseek-ai/dsh-llm": {
+      "optional": false
+    },
+    "@deepseek-ai/dsh-tools": {
+      "optional": false
+    }
   }
 }
