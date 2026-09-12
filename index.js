@@ -17,11 +17,14 @@ import {
   loadPages, ensureRepo, savePage, commitReadiness, readStagedBrief, countTriage,
   listTriage, readTriageBody, restoreTriage, discardTriage,
 } from './lib/wiki.js'
-import { readFile, writeFile, unlink } from 'node:fs/promises'
+import { readFile, writeFile, unlink, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { buildCorpus, scoreQuery, triage, recallable, looksLikeGap } from './lib/recall.js'
 import { appendGap, runAcquisition, readGaps } from './lib/acquire.js'
-import { createLlm } from './lib/llm.js'
+import { createLlm, SITES, SITE_LABEL, normalizeLlmConfig } from './lib/llm.js'
+import { runHarvest, stageHarvestItems } from './lib/harvest.js'
+import { listSessions } from './lib/session-store.js'
+import { sessionTranscriptRemote } from './lib/session-remote.js'
 import { createLogger } from './lib/log.js'
 import { applySkillTrim, agentKeyOf } from './lib/skills-trim.js'
 import { looksLikeCorrection, correctionRecord } from './lib/correction.js'
@@ -231,13 +234,19 @@ export function apply(ctx, pluginConfig = {}) {
     Object.assign(liveCfg, c)
     return c
   }
-  const llm = createLlm(ctx, { provider: pluginConfig?.llmProvider, model: pluginConfig?.llmModel })
   const tracker = createStruggleTracker(liveCfg)
   const caps = createCapabilityManager({ ctx, getCfg: () => liveCfg, log: (...a) => log(...a), wikiRoot: baseRoot })
   // 技能盘点：只读，带 TTL 缓存。刻意不进 inject —— 拿不到就如实说不可用。
   // 技能 provider 挂在 agent preset 的作用域层，不带 scope 查只能看到空的全局层。
   // 这里保存最近一次见过的 agent 作用域键，供 UI 路由（没有 agent 上下文）使用。
   let lastAgentScope
+  // 最近一个活着的 agent。界面上那个「从会话提炼」按钮**没有 agent 上下文**
+  // （它在 frame 级的座位里，不属于任何会话），只能借用最近一个 —— 与
+  // lastAgentScope 同一个思路。
+  //
+  // ★ 用 WeakRef 而不是强引用：强引用会把整个会话（实测有 10MB 的）钉在内存里，
+  //   这个插件已经因为大会话把宿主拖崩过。deref() 拿不到就退到磁盘上最近的会话。
+  let lastAgentRef = null
   const skills = createSkillInventory({ ctx, log: (...a) => log(...a), getScope: () => lastAgentScope })
 
   // 每会话的注入去重（KV cache 友好）：内容不变则不再重复注入
@@ -250,6 +259,7 @@ export function apply(ctx, pluginConfig = {}) {
       const k = scopeKeyOf(agent)
       if (k !== undefined) lastAgentScope = k
     } catch { /* 取不到就退化成不带 scope 的查询 */ }
+    try { if (agent && typeof WeakRef === 'function') lastAgentRef = new WeakRef(agent) } catch { /* 退到磁盘路径 */ }
   }
   // 后台补料互斥 + 冷却
   let acquiring = false
@@ -275,6 +285,14 @@ export function apply(ctx, pluginConfig = {}) {
   // 同步档：只在**重路径的阶段边界**用。默认的异步写盘在原生崩溃时会丢，
   // 而宿主崩过三次、每次都只剩 crashpad 一行 —— 没有这档就等于没有证据。
   const trace = createLogger(baseRoot, { sync: true })
+  // ★ 传 getCfg 而不是快照：每次调用重读 wiki.config.json，换模型不用重载插件。
+  //   以前这里读的是 apply() 的参数，于是写进配置文件的 llmProvider/llmModel
+  //   毫无反应 —— 一个"配了但没生效、也不报错"的坑。
+  const llm = createLlm(ctx, { getCfg, log: (...a) => log(...a) })
+  // 手动提炼的互斥闸 + 最近一次结果（界面按钮据此显示"上次干了什么"）。
+  // 并发两次提炼会各自读一遍 staged 再各写一批，判重互相看不见对方 —— 会写出重复页。
+  let harvesting = false
+  let lastHarvest = null
 
   // ── 宿主兼容性自检 ──
   //
@@ -506,6 +524,139 @@ export function apply(ctx, pluginConfig = {}) {
           return
         }
 
+        // ── 读路径 5：可用模型目录 + 各站点当前路由 ──
+        //
+        // 刻意**不**并进 /api/state：那条路径每 8 秒被轮询一次，而列模型
+        // 可能打网络（适配器自己决定）。界面只在打开「模型」页签时取一次。
+        if (url.pathname === '/learn-wiki/api/models' && req.method === 'GET') {
+          const regs = (typeof ctx.llm?.listProviders === 'function' ? ctx.llm.listProviders() : []) ?? []
+          const providers = []
+          for (const p of regs) {
+            let models = []
+            try {
+              const got = await ctx.llm.listModels(p.id)
+              if (Array.isArray(got)) models = got.filter(m => m && m.id).map(m => ({ id: String(m.id), name: String(m.name ?? m.id) }))
+            } catch { /* 列不出模型不是错误：适配器允许接受未列出的 id */ }
+            providers.push({ id: String(p.id), name: String(p.name ?? p.id), models })
+          }
+          let routes = {}
+          try { routes = await llm.routes() } catch (e) { routes = { error: String(e?.message ?? e) } }
+          send(200, {
+            ok: true,
+            providers,
+            llm: cfg.llm,
+            sites: SITES.map(s => ({ id: s, label: SITE_LABEL[s] ?? s })),
+            routes,
+            lastHarvest,
+          })
+          return
+        }
+
+        // ── 写路径 3：改模型配置 ──
+        // 与能力包同一套做法：写进 <wikiRoot>/wiki.config.json，可 git、可手改。
+        // 与能力包**不同的**一点：改完立刻生效，不用重载 —— createLlm 每次调用重读。
+        if (url.pathname === '/learn-wiki/api/llm' && req.method === 'POST') {
+          const body = await readBody()
+          if (!body || typeof body !== 'object') { send(400, { ok: false, error: '需要 JSON 体' }); return }
+          const cfgPath = join(cfg.wikiRoot, 'wiki.config.json')
+          let fileCfg = {}
+          try { fileCfg = JSON.parse(await readFile(cfgPath, 'utf8')) } catch { /* 首次创建 */ }
+          // ★ 落盘前**先过同一套归一化**（lib/llm.js 的 normalizeLlmConfig）。
+          //   界面与运行时对配置的解释只有一份：否则界面能存进一个 mode 拼错的
+          //   块，运行时读到时悄悄退回 single —— 存进去的和生效的不是一回事。
+          const next = normalizeLlmConfig({
+            mode: body.mode,
+            models: body.models,
+            onError: body.onError,
+            sites: body.sites,
+          }, { provider: fileCfg.llmProvider, model: fileCfg.llmModel })
+          fileCfg.llm = next
+          await writeFile(cfgPath, JSON.stringify(fileCfg, null, 2) + '\n', 'utf8')
+          log('ui: 模型配置已更新 -> ' + JSON.stringify({ mode: next.mode, onError: next.onError, models: next.models.map(m => m.provider + '/' + (m.model || '*')), sites: Object.keys(next.sites) }))
+          let routes = {}
+          try { routes = await llm.routes() } catch { /* 目录取不到不影响保存 */ }
+          send(200, { ok: true, saved: next, routes, note: '已写入 wiki.config.json，**下一次模型调用即生效**（不需要重载）' })
+          return
+        }
+
+        // ── 写路径 4：手动跑一次会话提炼（界面上那个按钮）──
+        //
+        // 与 wiki_harvest 工具**同一份实现**：runHarvest 取材 + stageHarvestItems 落盘。
+        // 落盘仍然只到 staged/ —— 按钮不是免检通道，固化照样要人去点。
+        if (url.pathname === '/learn-wiki/api/harvest' && req.method === 'POST') {
+          if (harvesting) { send(409, { ok: false, error: '上一次提炼还在跑，等它结束再点' }); return }
+          const body = (await readBody()) ?? {}
+          harvesting = true
+          try {
+            const focus = String(body.focus ?? '').slice(0, 300)
+            const wantSession = String(body.session ?? '').trim()
+            let agent = null, transcript = null, sessionRef = ''
+            let targetLabel = ''
+            if (wantSession) {
+              const all = listSessions({ includeSubagents: true })
+              const hit = all.find(s => s.id === wantSession) ?? all.find(s => s.id.startsWith(wantSession))
+              if (!hit) { send(404, { ok: false, error: '没找到会话 ' + wantSession }); return }
+              const trRes = await sessionTranscriptRemote(hit.file, hit, {})
+              if (!trRes.ok) { send(502, { ok: false, error: '读取会话失败：' + trRes.error }); return }
+              transcript = trRes.result
+              sessionRef = 'session://' + hit.id
+              targetLabel = hit.id
+            } else {
+              agent = lastAgentRef && typeof lastAgentRef.deref === 'function' ? (lastAgentRef.deref() ?? null) : null
+              if (agent) {
+                targetLabel = '当前会话（内存中）'
+              } else {
+                // 退到磁盘上**最近写过**的那个会话。按 createdAt 排序不够：
+                // 一个几小时前开始、现在还在用的会话会被排到新会话后面。
+                const cands = listSessions({ includeSubagents: false, limit: 20 })
+                let best = null
+                for (const s of cands) {
+                  try {
+                    const st = await stat(s.file)
+                    if (!best || st.mtimeMs > best.mtimeMs) best = { ...s, mtimeMs: st.mtimeMs }
+                  } catch { /* 文件没了就跳过 */ }
+                }
+                if (!best) { send(409, { ok: false, error: '没有可提炼的会话：内存里没有活着的会话，磁盘上也没有会话文件' }); return }
+                const trRes = await sessionTranscriptRemote(best.file, best, {})
+                if (!trRes.ok) { send(502, { ok: false, error: '读取会话失败：' + trRes.error }); return }
+                transcript = trRes.result
+                sessionRef = 'session://' + best.id
+                targetLabel = best.id + '（磁盘，宿主里没有活着的会话）'
+              }
+            }
+
+            const res = await runHarvest({
+              agent, transcript, sessionRef, llm, focus,
+              maxItems: body.maxItems,
+              maxTokens: cfg.harvestMaxTokens,
+              log,
+            })
+            if (res.skipped) {
+              lastHarvest = { at: new Date().toISOString(), target: targetLabel, skipped: true, reason: res.reason, staged: 0, transcriptChars: res.transcriptChars }
+              log('ui: 提炼未产出（' + targetLabel + '）：' + res.reason)
+              send(200, { ok: true, skipped: true, reason: res.reason, transcriptChars: res.transcriptChars, target: targetLabel, note: '这是正常结果 —— 拒绝优于写一页没有依据的东西。' })
+              return
+            }
+            const { written, duplicates } = await stageHarvestItems({ wikiRoot: cfg.wikiRoot, items: res.items, log })
+            lastHarvest = { at: new Date().toISOString(), target: targetLabel, skipped: false, staged: written.length, duplicates: duplicates.length, transcriptChars: res.transcriptChars }
+            log('ui: 提炼产出 ' + written.length + ' 页（' + targetLabel + '），跳过重复 ' + duplicates.length)
+            send(200, {
+              ok: true, skipped: false, staged: written,
+              ...(duplicates.length ? { duplicates } : {}),
+              transcriptChars: res.transcriptChars,
+              target: targetLabel,
+              note: '已落 staged/，去「知识」页签固化 —— 固化前不参与任何自动召回。',
+            })
+            return
+          } catch (e) {
+            log('ui: 提炼失败 ' + String(e?.message ?? e))
+            send(500, { ok: false, error: '提炼失败：' + String(e?.message ?? e) })
+            return
+          } finally {
+            harvesting = false
+          }
+        }
+
         if (url.pathname !== '/learn-wiki/api/state') { send(404, { ok: false, error: 'not found' }); return }
 
         const { pages } = await loadPages(cfg.wikiRoot)
@@ -579,6 +730,18 @@ export function apply(ctx, pluginConfig = {}) {
             },
           },
           skills: await skills.snapshot(),
+          // 模型：只给**配置**与**上次实际用过谁**。
+          // 刻意不在这里列 provider/模型 —— 那条路径每 8 秒轮询一次，
+          // 而列模型可能打网络。要完整目录就打开「模型」页签（/api/models）。
+          llm: {
+            mode: cfg.llm?.mode ?? 'single',
+            onError: cfg.llm?.onError ?? 'next',
+            models: (cfg.llm?.models ?? []).map(m => ({ provider: m.provider, model: m.model })),
+            sites: cfg.llm?.sites ?? {},
+            siteList: SITES.map(s => ({ id: s, label: SITE_LABEL[s] ?? s })),
+            lastUsed: Object.fromEntries(SITES.map(s => [s, llm.used(s)])),
+            lastHarvest,
+          },
           knowledge: { committed, staged, counts, threshold: { hit: cfg.hitThreshold, weak: cfg.weakThreshold } },
           gaps: { counts: gapCounts, total: gaps.length, recent: gaps.slice(-12).map(g => ({ query: String(g.query).slice(0, 90), status: g.status })) },
           // 分拣计数顺手带上（两次 readdir，可以忽略）。面板打开时 /api/state 每 8 秒
@@ -615,7 +778,10 @@ export function apply(ctx, pluginConfig = {}) {
     // 前端拿到 index.html（**HTTP 200**，content-type: text/html）。
     // 这个比 404 更难查：状态码是成功的。
     const dispose = ctx.webServer.register({ kind: 'prefix', path: '/learn-wiki', handler })
-    log('ui: /learn-wiki 已注册（prefix，覆盖 api/state|page|commit|capabilities|pending|triage）')
+    // 覆盖清单**手写**在这里，所以它会随着加端点而过时 —— 实测就过时过一次
+    // （加了 models/llm/harvest 之后这行还在报旧的六条）。日志说假话比不写更糟，
+    // 所以清单与路由放在一起，加路由时顺手改。
+    log('ui: /learn-wiki 已注册（prefix，覆盖 api/state|page|commit|capabilities|pending|triage|models|llm|harvest）')
     return () => { try { dispose() } catch {} }
   }, 'dsh-learn-wiki: ui route')
 

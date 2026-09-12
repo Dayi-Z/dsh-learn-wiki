@@ -53,6 +53,7 @@
     "verify:metrics": "node scripts/verify-metrics.mjs",
     "verify:skill-trim": "node scripts/verify-skill-trim.mjs",
     "verify:correction": "node scripts/verify-correction.mjs",
+    "verify:llm": "node scripts/verify-llm.mjs",
     "verify:compat": "node scripts/verify-compat.mjs",
     "ui:probe": "node scripts/ui-probe.mjs",
     "ui:snapshot": "node scripts/ui-snapshot.mjs"

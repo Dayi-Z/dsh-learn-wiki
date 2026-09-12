@@ -48,6 +48,10 @@ const API_PATHS = [
   '/learn-wiki/api/state', '/learn-wiki/api/page',
   '/learn-wiki/api/commit', '/learn-wiki/api/capabilities',
   '/learn-wiki/api/pending', '/learn-wiki/api/triage',
+  // 模型目录是**单独一条**端点而不是并进 /api/state：列 provider/模型可能打网络，
+  // 而 /api/state 每 8 秒被轮询一次。新加一条路径就得来这里加一行 —— 这条断言
+  // 存在的意义正是"漏注册就红"。
+  '/learn-wiki/api/models', '/learn-wiki/api/llm', '/learn-wiki/api/harvest',
 ]
 const regd = route && route.kind === 'prefix' ? route.path : null
 const unmatched = API_PATHS.filter(p => !(regd !== null && matchesPrefix(regd, p)))
@@ -80,6 +84,13 @@ if (payload) {
   check('含 gaps 段', !!payload.gaps)
   check('含 struggles 段', !!payload.struggles)
   check('含 skills 段', !!payload.skills, Object.keys(payload.skills || {}).join(','))
+  check('含 llm 段（模式 + 站点清单 + 上次实际用了谁）',
+    !!payload.llm && typeof payload.llm.mode === 'string'
+    && Array.isArray(payload.llm.siteList) && payload.llm.siteList.length >= 2,
+    JSON.stringify({ mode: payload.llm?.mode, sites: (payload.llm?.siteList || []).map(s => s.id) }))
+  check('★ llm 段里**不含** provider/model 目录（那条路径每 8 秒轮询一次，不能顺手列模型）',
+    payload.llm && payload.llm.providers === undefined,
+    Object.keys(payload.llm || {}).join(','))
   check('★ 读不到技能注册表时如实报告，而不是假装是空的',
     payload.skills?.available === false && typeof payload.skills?.reason === 'string',
     'available=' + payload.skills?.available + ' reason=' + payload.skills?.reason)
@@ -346,6 +357,72 @@ check('★ 配置确实落进 wiki.config.json', JSON.stringify(saved.capabiliti
 
 const c5 = await postCall('/learn-wiki/api/capabilities', { bad: 1 })
 check('非法载荷返回 400', c5.code === 400, 'code=' + c5.code)
+
+// ── 模型：目录 / 写配置 / 触发提炼 ──
+//
+// 这一段跑在临时 root（T）上（见上文 mod.apply 的那次重挂），所以写配置
+// **不会**碰到真实的 dsh-wiki/wiki.config.json。
+{
+  const m = await call('/learn-wiki/api/models')
+  let mj = null
+  try { mj = JSON.parse(m.body) } catch (e) { check('api/models 响应是合法 JSON', false, e.message) }
+  check('api/models 返回 200 且是 JSON', m.code === 200 && !!mj, 'code=' + m.code)
+  if (mj) {
+    check('api/models ok=true', mj.ok === true)
+    check('★ 带 provider 目录（界面要拿它做下拉框）',
+      Array.isArray(mj.providers) && mj.providers.every(p => typeof p.id === 'string' && Array.isArray(p.models)),
+      JSON.stringify((mj.providers || []).map(p => p.id + '(' + p.models.length + ')')))
+    check('★ 带全部站点及其人话名字（界面不自己翻译一份）',
+      Array.isArray(mj.sites) && mj.sites.length >= 2 && mj.sites.every(s => s.id && s.label),
+      JSON.stringify(mj.sites))
+    check('★ 带每个站点解析出来的路由（下一次会问谁）',
+      mj.routes && mj.routes.distill && mj.routes.harvest
+      && typeof mj.routes.distill.mode === 'string',
+      JSON.stringify(Object.keys(mj.routes || {})))
+  }
+
+  // 写配置：故意塞进一个拼错的 mode 和一个字符串形式的候选
+  const w = await postCall('/learn-wiki/api/llm', {
+    mode: 'ROTATE', models: ['m'], onError: 'sure-why-not',
+    sites: { distill: { models: ['m/m'] } },
+  })
+  let wj = null
+  try { wj = JSON.parse(w.body) } catch (e) { check('api/llm 响应是合法 JSON', false, e.message) }
+  check('api/llm 写回成功', w.code === 200 && wj && wj.ok === true, 'code=' + w.code + ' ' + String(w.body).slice(0, 160))
+  if (wj) {
+    check('★ mode 拼错被归一化成 single 才落盘（存进去的和生效的必须是同一份解释）',
+      wj.saved.mode === 'single', String(wj.saved.mode))
+    check('★ onError 认不出来时落 next', wj.saved.onError === 'next', String(wj.saved.onError))
+    check('★ 字符串 "m" 被解析成 { provider:"m", model:"" }',
+      wj.saved.models.length === 1 && wj.saved.models[0].provider === 'm' && wj.saved.models[0].model === '',
+      JSON.stringify(wj.saved.models))
+  }
+  const onDisk = JSON.parse(await rf(join(T, 'wiki.config.json'), 'utf8'))
+  check('★ 归一化后的 llm 块**确实落进了文件**（不是只在响应里好看）',
+    onDisk.llm && onDisk.llm.mode === 'single' && onDisk.llm.onError === 'next',
+    JSON.stringify(onDisk.llm))
+  check('★ 写 llm 不动 capabilities（一次保存不该冲掉手工配好的别的段）',
+    onDisk.capabilities && JSON.stringify(onDisk.capabilities.explicitOnly) === '["workflow","ralph"]',
+    JSON.stringify(onDisk.capabilities && onDisk.capabilities.explicitOnly))
+
+  // 未注册的 provider：写得进去，但**运行时必须报出来**
+  const w2 = await postCall('/learn-wiki/api/llm', { mode: 'rotate', models: ['nope/nope', 'm/m'] })
+  const w2j = JSON.parse(w2.body)
+  const rejected = w2j.routes && w2j.routes.distill && w2j.routes.distill.rejected
+  check('★ 未注册的 provider 被运行时标出来（否则用户以为轮换在用两个模型）',
+    Array.isArray(rejected) && rejected.length === 1 && /未注册/.test(rejected[0].why),
+    JSON.stringify(rejected))
+  check('★ 幸存的候选仍在（不是整份配置作废）',
+    (w2j.routes.distill.candidates || []).length === 1, JSON.stringify(w2j.routes.distill.candidates))
+
+  // 提炼：未知会话 id
+  const hMiss = await postCall('/learn-wiki/api/harvest', { session: 'no-such-session-xyz' })
+  let hmj = null
+  try { hmj = JSON.parse(hMiss.body) } catch (e) { check('api/harvest 响应是合法 JSON', false, e.message) }
+  check('★ 未知会话返回 404 + 可读原因（不是 HTML、不是 500）',
+    hMiss.code === 404 && hmj && hmj.ok === false && /没找到会话/.test(String(hmj.error)),
+    'code=' + hMiss.code + ' ' + String(hMiss.body).slice(0, 140))
+}
 
 // ── ★ 桌面载体（app://）形态的 POST ──
 //

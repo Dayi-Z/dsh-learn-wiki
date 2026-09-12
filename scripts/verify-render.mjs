@@ -200,6 +200,9 @@ for (const [label, Component, props] of [
   ['知识页签', C.KnowledgeTab, { state }],
   ['补料页签', C.SupplyTab, { state }],
   ['面板外壳', C.PanelBody, {}],
+  ['模型页签', C.ModelsTab, { state }],
+  ['候选列表编辑器', C.ModelListEditor, { value: { mode: 'rotate', models: [{ provider: 'p', model: 'm' }] }, providers: [{ id: 'p', name: 'P', models: [{ id: 'm', name: 'M' }] }], onChange: () => {} }],
+  ['提炼段', C.HarvestSection, { state }],
   ['底栏入口', C.FooterEntry, {}],
   ['面板容器', C.Workbench, { onClose: () => {} }],
   ['展开行（读取中）', C.PageDetail, { id: 'x', meta: {}, page: { loading: true }, onRetry: () => {} }],
@@ -539,6 +542,38 @@ console.log('── 底栏入口（座位 sidebar.footer.action 的 wide 契约�
     css.includes(':has(> .lw-fb-cell)') && css.includes('flex-wrap:wrap'))
   check('CSS 定义了单元格 / 按钮 / 轨道态三类度量',
     /.lw-fb-cell\{[^}]*\}/.test(css) && /\.lw-fb\{[^}]*\}/.test(css) && /\.lw-fb-rail\{[^}]*\}/.test(css))
+}
+
+// ── 4.6 模型页签与提炼按键 ──
+console.log('')
+console.log('── 模型页签 / 提炼按键 ──')
+{
+  const llmState = makeState({})
+  llmState.llm = {
+    mode: 'rotate', onError: 'next',
+    models: [{ provider: 'p1', model: 'm1' }, { provider: 'p2', model: 'm2' }],
+    sites: { harvest: { mode: 'single', models: [{ provider: 'p2', model: 'm2' }] } },
+    siteList: [{ id: 'distill', label: '蒸馏（联网补料）' }, { id: 'harvest', label: '提炼（会话）' }],
+    lastUsed: { distill: { provider: 'p1', model: 'm1', at: '2026-01-01T00:00:00Z', tries: 1 } },
+    lastHarvest: { at: '2026-01-01T00:00:00Z', target: 'session://abc', skipped: true, reason: '没有值得留的', staged: 0 },
+  }
+  const html = renderToStaticMarkup(h(C.ModelsTab, { state: llmState }))
+  check('模型页签按站点列出环节', html.includes('蒸馏（联网补料）') && html.includes('提炼（会话）'))
+  check('★ 显示"上一次实际用的"而不是只显示配置（配置说会用谁 ≠ 真的用了谁）',
+    html.includes('p1/m1'), html.includes('p1/m1') ? '' : '没找到 p1/m1')
+  check('★ 候选按序号列出（顺序就是语义：轮换按它循环，单一用第一个）',
+    html.includes('lw-midx') && html.includes('p1/') && html.includes('p2/'))
+  check('★ 单一模式下把"第一个就是会被用的那个"标出来',
+    html.includes('单一模式用这个'))
+  check('★ 没有候选时明说"跟随宿主默认"，而不是留一片空白',
+    renderToStaticMarkup(h(C.ModelsTab, { state: makeState({}) })).includes('跟随宿主默认'))
+
+  const hHtml = renderToStaticMarkup(h(C.HarvestSection, { state: llmState }))
+  check('★ 提炼按键渲染出来了', hHtml.includes('提炼这段会话'))
+  check('★ 按键旁写清"会问谁"（一次模型调用的代价要看得见）',
+    hHtml.includes('会问：') && hHtml.includes('p2/m2'), hHtml.slice(0, 0) || '')
+  check('★ 显示上一次提炼的结果（含"未产出"这种正常结果）',
+    hHtml.includes('上次：') && hHtml.includes('没有值得留的'))
 }
 
 // ── 5. 诚实性 ──
