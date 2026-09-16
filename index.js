@@ -202,6 +202,10 @@ export function apply(ctx, pluginConfig = {}) {
 // 上限是必要的：形状一旦真的变了，每步都会命中，不设上限就是刷屏 ——
 // 而一条刷屏的日志和一条没有的日志，在"能不能被发现"上是一样的。
 let compactUnrecognizedLogged = 0
+
+// 一次性探针的闸（见 pre-step 里那段注释）。它只回答一个问题：
+// 这个钩子拿到的 decision.messages 里到底有没有那个注入块。
+let boundedProbeDone = false
   const getCfg = async () => {
     const c = await loadConfig(baseRoot, pluginConfig)
     Object.assign(liveCfg, c)
@@ -901,6 +905,37 @@ let compactUnrecognizedLogged = 0
     let cfg
     try { cfg = await getCfg() } catch { return decision }
     if (!cfg.enabled) return decision
+    // ── 一次性探针：这个钩子到底拿得到什么（2026-09-17）──
+    //
+    // 为什么需要它：压缩逻辑在真宿主里**从 2026-09-10 起就没再触发过**
+    //（插件日志里 compact: 只有一条），而同一钩子里的 capabilities: 有几百条
+    // —— 说明钩子本身在跑，只是没看到该压的东西。
+    //
+    // 两种可能，修法完全不同：
+    //   A. decision.messages 里**根本没有**注入块（上下文在别处组装）→ 该换钩子；
+    //   B. 有块但形状不认 → 该扩形状（已扩过一次，见 lib/hindsight-compact.js）。
+    // 只打日志分不出来，所以这里把**事实**记一次：消息条数、键名、块在不在。
+    //
+    // ★ 只记一次（boundedProbe），且不打印正文 —— 一次性的诊断不该变成常驻噪音，
+    //   也不该把用户内容写进日志。
+    if (!boundedProbeDone) {
+      boundedProbeDone = true
+      try {
+        const msgs = Array.isArray(decision?.messages) ? decision.messages : null
+        const flat = msgs ? JSON.stringify(msgs) : ''
+        const hasBlock = flat.includes('hindsight_knowledge')
+        const shapes = msgs ? msgs.map(m => {
+          const c = m && m.content
+          if (typeof c === 'string') return 'string'
+          if (Array.isArray(c)) return 'array(' + c.map(p => (p && p.type) || (p && typeof p.text === 'string' ? 'text-no-type' : '?')).join('/') + ')'
+          return c === undefined ? 'none' : typeof c
+        }).join(', ') : 'no-array'
+        log('probe: pre-step decision 有 ' + (msgs ? msgs.length : 0) + ' 条消息；'
+          + '含 hindsight 块=' + hasBlock + '；形状=' + shapes
+          + '；decision 键=' + Object.keys(decision || {}).join(','))
+      } catch (e2) { log('probe failed (non-fatal): ' + (e2?.message ?? e2)) }
+    }
+
     // 用户新提示词到达 = 新任务，上一轮的挣扎不该污染这一次的判定
     // 压缩 hindsight 注入块：它在 prepend 的钩子里已进入批次，这里后处理
     if (liveCfg.compactHindsightBlock !== false && decision.messages?.length) {
