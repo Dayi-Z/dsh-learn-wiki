@@ -197,6 +197,11 @@ export function apply(ctx, pluginConfig = {}) {
   // 所以维护一份"活的"配置快照：getCfg 每次解析后原地更新它，
   // 检测器始终读到最新阈值（阈值调了不用重启）。
   const liveCfg = { ...DEFAULTS, wikiRoot: baseRoot }
+
+// "看到了注入块但压不动"这件事最多记 3 次（见 pre-step 里那段注释）。
+// 上限是必要的：形状一旦真的变了，每步都会命中，不设上限就是刷屏 ——
+// 而一条刷屏的日志和一条没有的日志，在"能不能被发现"上是一样的。
+let compactUnrecognizedLogged = 0
   const getCfg = async () => {
     const c = await loadConfig(baseRoot, pluginConfig)
     Object.assign(liveCfg, c)
@@ -903,6 +908,20 @@ export function apply(ctx, pluginConfig = {}) {
       if (c.changed) {
         decision = { ...decision, messages: c.messages }
         log('compact: hindsight 注入块已压缩为指针')
+      }
+      // ★ 认得出注入块却压不动时**必须出声**。
+      //
+      //   为什么：这条路径曾经静默失效**三个多月**。插件日志里 compact: 只出现过
+      //   一次（2026-09-10），而同期 capabilities: 有几百条 —— 也就是说它早就不再
+      //   生效了，只是因为它"只在确实压到东西时才写日志"，谁都没发现。
+      //   根因是它只认一种消息形状（详见 lib/hindsight-compact.js 里 compactPart 的注释）。
+      //   形状这种事**上游一改就变**，所以这里留一个"我看到了块但压不动"的信号。
+      //
+      //   只在真的看见块时记，且带一个上限，免得它变成刷屏的噪音。
+      if (c.unrecognized > 0 && compactUnrecognizedLogged < 3) {
+        compactUnrecognizedLogged++
+        log('compact: ★ 看到 ' + c.unrecognized + ' 条带注入块的消息但压不动（消息形状变了？）—— '
+          + '请在 lib/hindsight-compact.js 的 compactPart 里补上新形状')
       }
     }
 

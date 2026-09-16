@@ -120,6 +120,37 @@ check('★ 一条消息里**两份** refresh：两份清单都要在（整条替
 check('纯函数 compactRefreshText 对空输入不炸', compactRefreshText('').touched === false && compactRefreshText(null).touched === false)
 
 console.log('')
+console.log('=== ★ 消息形状：宿主可能交给我们的每一种 ===')
+{
+  // 这一组是**真宿主里静默失效三个多月之后**补的（2026-09-17 查日志发现）：
+  // 插件日志里 compact: 只出现过一次（2026-09-10），而同期 capabilities 有几百条。
+  // 原因是原实现只认 content = [{type:'text', text}] —— 测试夹具一直是这个形状，
+  // 于是"测得到"与"跑得到"之间裂了一条缝，而且**认不出形状时它静默返回**。
+  const shapes = [
+    ['content = [{type:text,text}]（夹具一直是这个）', { content: [{ type: 'text', text: FIRST_BLOCK }] }, true],
+    ['content = 字符串', { content: FIRST_BLOCK }, true],
+    ['content = [{type:input_text}]', { content: [{ type: 'input_text', text: FIRST_BLOCK }] }, true],
+    ['content = [{text}]（没有 type 字段）', { content: [{ text: FIRST_BLOCK }] }, true],
+    ['content 里混了 image part', { content: [{ type: 'text', text: FIRST_BLOCK }, { type: 'image', source: {} }] }, true],
+    ['refresh 块走字符串形状', { content: REFRESH_BLOCK }, true],
+  ]
+  for (const [label, msg, want] of shapes) {
+    const r = compact([msg])
+    check(label, r.changed === want, r.changed === want ? '已压缩' : 'changed=' + r.changed + '，期望 ' + want)
+  }
+  const weird = compact([{ content: { not: 'array', but: HINDSIGHT_MARK + 'x</hindsight_knowledge>' } }])
+  check('★ 认得出注入块却压不动时，返回里带上 unrecognized 计数（不再无声）',
+    weird.changed === false && weird.unrecognized >= 1, 'unrecognized=' + weird.unrecognized)
+  const normal = compact([{ content: [{ type: 'text', text: '普通消息' }] }])
+  check('普通消息不会被记成"认不出"（否则这个计数会变成噪音）',
+    normal.changed === false && normal.unrecognized === 0, 'unrecognized=' + normal.unrecognized)
+  check('压完之后同一 part 里的其它正文仍然在（不丢内容）', (() => {
+    const r = compact([{ content: [{ type: 'text', text: FIRST_BLOCK + '\n\n另一段普通文本' }] }])
+    return r.changed && r.messages[0].content[0].text.includes('另一段普通文本')
+  })())
+}
+
+console.log('')
 if (failures === 0) console.log('ALL PASS — 两个注入块都压到位，且清单不会被压丢')
 else console.log(failures + ' FAILURE(S)')
 process.exit(failures === 0 ? 0 : 1)

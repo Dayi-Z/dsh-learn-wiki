@@ -78,6 +78,27 @@ console.log('── 宿主 API 核对 ──')
   check('每项都带 why（报告要能解释"缺了会怎样"）',
     REQUIRED_APIS.every(r => typeof r.why === 'string' && r.why.length > 0))
   check('空 ctx 不炸', Array.isArray(checkHostApis({}).missing))
+
+  // ★ 会抛的上下文 —— 这一条是**真宿主里炸过之后**补的。
+  //
+  //   Cordis 对未声明的服务是**抛异常**而不是返回 undefined：
+  //     ctx.sessionQuery -> Error: cannot get property "sessionQuery" without inject
+  //   第一版 dig() 直接读，于是整个 compat 自检在真宿主里崩掉，
+  //   而单测用的是普通对象（读不存在的键给 undefined）→ 测不出来。
+  //   夹具必须复现**真实语义**，否则它测的是我们的想象。
+  const throwingCtx = new Proxy({}, {
+    get(_t, k) {
+      if (k === 'then') return undefined          // 别把 probe 变成 thenable
+      throw new Error('cannot get property "' + String(k) + '" without inject')
+    },
+  })
+  const t = checkHostApis(throwingCtx)
+  check('★ 会抛的上下文（Cordis 对未声明服务的真实语义）不能让核对崩掉',
+    Array.isArray(t.missing) && t.missing.length === REQUIRED_APIS.filter(r => !r.optional).length,
+    'missing=' + t.missing.length + ' optional=' + t.optionalMissing.length)
+  check('★ 抛异常的宿主与返回 undefined 的宿主判得一样（对插件而言都只是"用不了"）',
+    JSON.stringify(t.missing.map(m => m.path)) === JSON.stringify(checkHostApis({}).missing.map(m => m.path)),
+    JSON.stringify(t.missing.map(m => m.path)))
 }
 
 // ── 4. 宿主版本探测：读不到就说读不到 ──

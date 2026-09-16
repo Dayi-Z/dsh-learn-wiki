@@ -118,7 +118,7 @@ check('★ 完全无关的查询不得判为 hit（hit 会注入整页正文）'
 //     断言写在下面，是为了让"什么时候该重跑"变成一个会红的信号，而不是靠记性。
 const qKnown = scoreQuery(corpus, '如何配置 kubernetes sidecar 注入策略')
 const tKnown = triage(qKnown)
-const KNOWN_RECORDED = 0.1493   // 2026-09-16 在 66 页真实语料上实测（meta 排除 + 标识符缺词折扣）
+const KNOWN_RECORDED = 0.1553   // 2026-09-17 实测（给 meta 页打标签之后语料又动了一次）
 console.log('\n已知缺陷用例: bucket=' + tKnown.bucket + ' best=' + tKnown.best + '（记录值 ' + KNOWN_RECORDED + '）')
 check('★ 已知缺陷不再注入整页：通用词重叠查询不得判成 hit',
   tKnown.bucket !== 'hit',
