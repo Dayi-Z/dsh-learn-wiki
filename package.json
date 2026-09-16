@@ -56,6 +56,7 @@
     "verify:llm": "node scripts/verify-llm.mjs",
     "verify:compat": "node scripts/verify-compat.mjs",
     "verify:hindsight-compact": "node scripts/verify-hindsight-compact.mjs",
+    "verify:web": "node scripts/verify-web-acquire.mjs",
     "ui:probe": "node scripts/ui-probe.mjs",
     "ui:snapshot": "node scripts/ui-snapshot.mjs",
     "verify:gap-race": "node scripts/verify-gap-race.mjs"
