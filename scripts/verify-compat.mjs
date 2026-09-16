@@ -60,9 +60,12 @@ console.log('── 宿主 API 核对 ──')
 {
   // 注意 llm / skills 是**服务对象**，不是函数 —— 第一版按"必须是函数"判，
   // 把存在的东西报成了缺失。那种报告会训练人忽略警告。
-  const full = { tools: { register() {}, schemas() {}, restrict() {} }, llm: { listProviders() {} }, web: { search() {} }, webServer: { register() {} }, skills: { snapshot() {} }, agent: { inject() {} } }
+  const full = { tools: { register() {}, schemas() {}, restrict() {} }, llm: { listProviders() {} }, web: { search() {} }, webServer: { register() {} }, skills: { snapshot() {} }, agent: { inject() {} }, sessionQuery: { listSessions() {} } }
   const a = checkHostApis(full)
   check('全都在这时不报缺失', a.missing.length === 0 && a.optionalMissing.length === 0, JSON.stringify(a.present.length))
+  check('★ 服务对象按"存在即可"判，不要求是函数（llm / skills / sessionQuery 都是对象）',
+    a.present.includes('sessionQuery') && a.present.includes('llm') && a.present.includes('skills'),
+    a.present.filter(p => ['sessionQuery', 'llm', 'skills'].includes(p)).join(', '))
   check('核对项数 = 清单长度', a.present.length === REQUIRED_APIS.length, a.present.length + ' vs ' + REQUIRED_APIS.length)
 
   const partial = { tools: { register() {}, schemas() {} }, llm: {}, web: { search() {} }, webServer: { register() {} } }

@@ -19,35 +19,92 @@ const check = (label, ok, detail = '') => {
 
 const CLIENT = new URL('../client/client.js', import.meta.url)
 
-// DSH 安装位置不固定；找不到就跳过，而不是假装通过。
-const CANDIDATES = [
-  'D:/Harness/dsh-desktop/resources/app/node_modules/@deepseek-ai/dsh-web-frontend/dist/assets',
-  join(process.env.APPDATA || '', '..', 'Local', 'Programs', 'dsh-desktop', 'resources', 'app', 'node_modules', '@deepseek-ai', 'dsh-web-frontend', 'dist', 'assets'),
+// ── DSH 应用在哪 ──
+//
+// ★ 这里踩过一次，值得写下来：候选路径原先写的是
+//     D:/Harness/dsh-desktop/resources/app/...
+//   而应用实际装在
+//     D:/Harness/dsh-desktop/DSH Desktop/resources/app/...
+//   —— 中间那个**带空格的子目录**。于是 existsSync 全部为假，脚本打了
+//   "SKIP 找不到…（不假装通过）" 就退出了。诚实，但**等于这条核对从来没跑过**，
+//   而它本来是唯一能挡住"引用了不存在的 token"的闸门；
+//   上一次真出这个 bug 时，它就是这么静默失效过去的。
+//
+//   所以现在做两件事：候选路径带上真实形状；并且**扫不到就红**（见下面
+//   "决定性"那几条）—— 一条永远 SKIP 的检查等于没有检查。
+const APP_CANDIDATES = [
+  'D:/Harness/dsh-desktop/DSH Desktop/resources/app',
+  'D:/Harness/dsh-desktop/resources/app',
+  join(process.env.APPDATA || '', '..', 'Local', 'Programs', 'dsh-desktop', 'resources', 'app'),
+  join(process.env.APPDATA || '', '..', 'Local', 'Programs', 'DSH Desktop', 'resources', 'app'),
 ].filter(Boolean)
 
-let cssDir = null
-for (const d of CANDIDATES) if (existsSync(d)) { cssDir = d; break }
-
-if (!cssDir) {
-  console.log('  SKIP  找不到 DSH 前端资源目录，跳过变量核对（不假装通过）')
-  console.log('\nALL PASS — 客户端变量核对（已跳过）')
-  process.exit(0)
+let aiDir = null       // .../resources/app/node_modules/@deepseek-ai
+for (const a of APP_CANDIDATES) {
+  const d = join(a, 'node_modules', '@deepseek-ai')
+  if (existsSync(d)) { aiDir = d; break }
 }
 
+const { readdir } = await import('node:fs/promises')
 const client = await readFile(CLIENT, 'utf8')
 
-// ── 收集 DSH 真实定义过的变量 ──
-const { readdir } = await import('node:fs/promises')
-const files = (await readdir(cssDir)).filter(f => f.endsWith('.css'))
-let defined = new Set()
-for (const f of files) {
-  const css = await readFile(join(cssDir, f), 'utf8')
-  // 只看**定义**（--x: value），不看引用
-  const re = /(--(?:dsw|ds)-[a-z0-9-]+)\s*:/g
-  let m
-  while ((m = re.exec(css))) defined.add(m[1])
+/**
+ * 收集 DSH 真实定义过的主题变量。
+ *
+ * ★ 扫描范围是 **client 插件包**，不是前端 dist 里的 .css。
+ *   实测（2026-09-16）：--dsw-* 这一族在前端 dist 的 CSS 里**一个都没有**
+ *   （那里只有 --dsh-boot-* 等启动期变量），它们定义在
+ *   dsh-client-ui-+ / lib/client.js 的内联样式里。旧版只扫 CSS，
+ *   于是"提取到 2 个变量"然后判客户端引用的 33 个全部不存在 —— 一个假红，
+ *   而且它红得很有说服力（看起来像客户端引用了不存在的 token）。
+ *   这次把定义域换成真正的定义处，判据才站得住。
+ */
+async function collectDefinedTokens(dir) {
+  const defined = new Set()
+  let scanned = 0
+  const walk = async (d, depth) => {
+    if (depth > 3) return
+    let es
+    try { es = await readdir(d, { withFileTypes: true }) } catch { return }
+    for (const e of es) {
+      const p = join(d, e.name)
+      if (e.isDirectory()) {
+        // dist/assets/types 里没有定义，只有拷贝
+        if (['node_modules', 'dist', 'assets', 'types'].includes(e.name)) continue
+        await walk(p, depth + 1)
+      } else if (/\.(js|css)$/.test(e.name)) {
+        let t = ''
+        try { t = await readFile(p, 'utf8') } catch { continue }
+        scanned++
+        // 只看**定义**（--x: value），不看引用
+        for (const m of t.matchAll(/--(?:dsw|dsh|ds)-[A-Za-z0-9-]+\s*:/g)) {
+          defined.add(m[0].replace(/\s*:$/, ''))
+        }
+      }
+    }
+  }
+  await walk(dir, 0)
+  return { defined, scanned }
 }
-check('提取到 DSH 主题变量集合', defined.size > 50, 'n=' + defined.size)
+
+let defined = new Set()
+let scannedFiles = 0
+if (aiDir) {
+  const pkgs = (await readdir(aiDir, { withFileTypes: true }))
+    .filter(e => e.isDirectory() && (e.name.startsWith('dsh-client-') || e.name.startsWith('dsh-web-')))
+    .map(e => e.name)
+  for (const p of pkgs) {
+    const r = await collectDefinedTokens(join(aiDir, p))
+    for (const n of r.defined) defined.add(n)
+    scannedFiles += r.scanned
+  }
+}
+
+// ★ "查不了"不许变成"没问题"。找不到应用就**红**，不再 SKIP ——
+//   这条检查的价值全在"它真的跑过"，跳过它等于把上一次那个 bug 的闸门焊死。
+check('★ 找得到 DSH 应用目录（找不到就是这条核对没跑，而不是没问题）',
+  !!aiDir, aiDir ?? ('试过: ' + APP_CANDIDATES.join(' | ')))
+check('提取到 DSH 主题变量集合', defined.size > 50, 'n=' + defined.size + '（扫了 ' + scannedFiles + ' 个文件）')
 
 // ── 收集客户端引用的变量（排除插件自定义的 --lw-* 本地变量）──
 const referenced = new Set()
@@ -167,33 +224,19 @@ check('★ primary 底色与字色成对出现（拆开自己配会在某个主�
 // 一个都没有，它们定义在 dsh-client-ui-conversation/lib/client.js）。
 // 不查的后果是：DSH 哪天改名，条子会静默退回 780px 并悄悄和输入框错开 —
 // 正是这个文件开头说的那类"因为带回退色所以一直静默失效"的故障。
-const dshDefined = new Set()
+// ★ 这一族与上面那族现在**共用同一个定义域**（defined 收集的就是
+//   --dsw-* / --dsh-* / --ds-* 三种前缀），所以这里只需要把引用筛出来比对。
+//   旧版为它单独扫一遍 dsh-client-*\lib\client.js，于是同一件事有两处实现 ——
+//   而上面那次路径失配正好只坏了一处。
 const dshRefs = new Set()
-{
-  const aiDir = join(cssDir, '..', '..', '..')   // .../node_modules/@deepseek-ai
-  if (existsSync(aiDir)) {
-    const pkgs = (await readdir(aiDir)).filter(n => n.startsWith('dsh-client-'))
-    for (const p of pkgs) {
-      const cj = join(aiDir, p, 'lib', 'client.js')
-      if (!existsSync(cj)) continue
-      const t = await readFile(cj, 'utf8')
-      for (const m of t.matchAll(/(--dsh-[a-z0-9-]+)\s*:/g)) dshDefined.add(m[1])
-    }
-  }
-  for (const m of client.matchAll(/var\(\s*(--dsh-[a-z0-9-]+)/g)) dshRefs.add(m[1])
-}
-if (dshDefined.size === 0) {
-  console.log('  SKIP  没扫到任何 --dsh-* 定义（找不到 dsh-client-* 包），跳过这一族')
-} else {
-  check('扫到了 --dsh-* 定义集合', dshDefined.size > 0, 'n=' + dshDefined.size)
-  const dshMissing = [...dshRefs].filter(n => !dshDefined.has(n)).sort()
-  check('★ 引用的每个 --dsh-* 变量都真实存在（否则宽度会静默退回兜底值并错位）',
-    dshMissing.length === 0,
-    dshMissing.length ? '不存在的: ' + dshMissing.join(', ') : '全部 ' + dshRefs.size + ' 个已核对')
-  check('★ 待办条用输入框的宽度变量对齐（不是自己写一个 px）',
-    dshRefs.has('--dsh-composer-card-max-width') && dshRefs.has('--dsh-composer-side-clearance'),
-    [...dshRefs].join(', '))
-}
+for (const m of client.matchAll(/var\(\s*(--dsh-[a-z0-9-]+)/g)) dshRefs.add(m[1])
+const dshMissing = [...dshRefs].filter(n => !defined.has(n)).sort()
+check('★ 引用的每个 --dsh-* 变量都真实存在（否则宽度会静默退回兜底值并错位）',
+  dshRefs.size > 0 && dshMissing.length === 0,
+  dshMissing.length ? '不存在的: ' + dshMissing.join(', ') : '全部 ' + dshRefs.size + ' 个已核对')
+check('★ 待办条用输入框的宽度变量对齐（不是自己写一个 px）',
+  dshRefs.has('--dsh-composer-card-max-width') && dshRefs.has('--dsh-composer-side-clearance'),
+  [...dshRefs].join(', '))
 
 console.log(failures === 0 ? '\nALL PASS — 客户端引用正确' : '\n' + failures + ' FAILURE(S)')
 process.exit(failures === 0 ? 0 : 1)

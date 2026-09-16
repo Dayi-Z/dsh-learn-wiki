@@ -35,6 +35,7 @@ import { createCapabilityManager, loadCatalogSnapshot } from './lib/capabilities
 // 否则并发的记录会互相覆盖丢失（详见 lib/usage.js 与 lib/lock.js 的注释）。
 import { loadUsage, updateUsage, recordHit, recordConfirmed, recordSuspect, usageLabel, classify, shouldQuarantine, reinforcementFactor, DEFAULT_POLICY } from './lib/usage.js'
 import { createSkillInventory, scopeKeyOf } from './lib/skills.js'
+import { createHindsightCompactor } from './lib/hindsight-compact.js'
 import { registerTools } from './lib/tools.js'
 
 export const name = 'dsh-learn-wiki'
@@ -91,17 +92,6 @@ function delegationDepth(agent) {
 }
 function isSubagent(agent) { return delegationDepth(agent) > 0 }
 
-const HINDSIGHT_MARK = '<hindsight_knowledge>'
-/**
- * 把 hindsight 的注入块换成短指针。
- *
- * 为什么：该块约 1,900 字符，其中 TOOL_GUIDE 逐条重述了 8 个工具的用途，
- * 而那些描述**已经在工具 schema 里**（那 8 个工具本身占 1,285 token）。
- * 纯重复，而且它的知识页清单目前还是坏的（永远显示"No knowledge pages yet"）。
- *
- * 保留一行指针的原因是：工具 schema 只说明"怎么用"，不说明"现在该用"。
- * 那一句时机提示是有价值的，所以留 ~50 token 而不是全删。
- */
 /**
  * 把刚补到的知识投递进**当前这一轮**。
  *
@@ -145,31 +135,9 @@ async function deliverToCurrentTurn(agent, page, log) {
   }
 }
 
-const HINDSIGHT_COMPACT = HINDSIGHT_MARK
-  + '本仓库有 Hindsight 长期记忆与知识页。回答项目相关问题前先用 hindsight_search_knowledge_pages 检索并引用页面；'
-  + '开始非平凡任务前用 hindsight_list_knowledge_pages 看项目已知什么。详见各 hindsight_* 工具的 schema。'
-  + '</hindsight_knowledge>'
-
-function compactHindsight(messages) {
-  let changed = false
-  const out = messages.map((m) => {
-    const parts = m?.content
-    if (!Array.isArray(parts)) return m
-    let hit = false
-    const next = parts.map((p) => {
-      if (p && p.type === 'text' && typeof p.text === 'string' && p.text.includes(HINDSIGHT_MARK)) {
-        hit = true
-        return { ...p, text: HINDSIGHT_COMPACT }
-      }
-      return p
-    })
-    if (!hit) return m
-    changed = true
-    // 保留原来源归属，只换正文
-    return buildUserMessage(HINDSIGHT_COMPACT, m.source)
-  })
-  return changed ? { messages: out, changed: true } : { messages, changed: false }
-}
+// 压缩逻辑放在 lib/hindsight-compact.js：那里是纯函数、有断言覆盖。
+// 放在这个闭包里的代价实测过 —— 它测不到，而"改了没生效"正是这一路的高发形态。
+const compactHindsight = createHindsightCompactor(buildUserMessage)
 
 /**
  * 剥掉注入块再当查询用。

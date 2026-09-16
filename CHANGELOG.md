@@ -5,6 +5,75 @@
 
 ## [Unreleased]
 
+跟着宿主（0.1.5-rc.2 / DSHDesktop 0.9.0）与 Hindsight（0.6.1）对齐的一轮。
+
+### 修复
+
+- **宿主改了会话文件名，历史从某一天起就不再增长了**（静默失效）。宿主把
+  `session.jsonl.zstd` 改成了 **`session.v3.jsonl.zstd`**，而这里用的是**精确字符串匹配**。
+  - 实测：磁盘上 2026-09-15 20:30 之后新建的会话全是 vN 命名，
+    `listSessions()` 返回 63 个、最新一条停在 `2026-09-16T05:28Z`，当前会话根本查不到。
+    **不报错、不告警** —— 正是这个项目最忌讳的形态。
+  - 改为**整名锚定**的正则 `^session(?:\.v(\d+))?\.jsonl\.zstd$`（放行 vN、同时挡住
+    `session.jsonl.zstd.bak-20260915` 与 `...frame-broken-bak` 这类备份——
+    用 `includes` 会把**已经判定损坏的文件**重新塞回历史）。
+  - ★ **版本从事件流头部的 `version` 读，不从文件名反推**：文件名是副本，副本会漂移；
+    真源与副本不一致时信真源，读不到时给 `null` 而不是 `0`（`0` 是一个具体版本 v0，
+    "不知道"不是）。`listSessions()` 每行现在带上 `version`。
+  - 修完实测：可见会话 63 → **73**，最新一条是本会话，且能正确摘要出
+    `toolCalls=309 failures=14 files=5`。
+
+- **PTC 会话的内层工具调用全部没被看见**。宿主把 Code Mode 的派发事件从
+  `tool/code-dispatch` 改成了 **`tool/ptc-dispatch`**（载荷结构相同，只是改名）。
+  - 漏掉之后：`toolsUsed` 只剩 `run_code`、`filesTouched` 全空、`failures` 为 0 ——
+    摘要会**反过来说话**（读起来像"这次没改过文件也没踩过坑"），而 v3 会话不再写
+    `assistant/chunk` 等流式事件，这些派发事件是**唯一**线索。
+  - 两个名字都认（老会话仍要能读）。
+
+- **`scripts/verify-client-tokens.mjs` 一直在 SKIP，等于这条闸门从没关上过**。
+  候选路径写的是 `dsh-desktop/resources/app/...`，而应用实际在
+  `dsh-desktop\DSH Desktop\resources\app\...`（中间那个**带空格的子目录**）。
+  - 现在：路径补齐，**扫不到就红**（"查不了"不许变成"没问题"——一条永远 SKIP 的检查
+    等于没有检查）。
+  - ★ 顺手修掉一个**假红**：`--dsw-*` 这一族在前端 dist 的 `.css` 里**一个都没有**，
+    它们定义在 `@deepseek-ai/dsh-client-*` 的内联样式里。旧版只扫 CSS，于是
+    "提取到 2 个变量"然后判客户端引用的 31 个全部不存在。现在定义域换成真正的定义处，
+    实测 388 个定义 / 31 个引用**全部存在**。
+
+### 新增
+
+- **压掉 Hindsight 的第二个注入块**（`<hindsight_knowledge_refresh>`）。
+  hindsight-coding-agents 0.6.1 起除了开头那次，还会**每 N 轮再注一遍**
+  （本机 `pageRefreshEveryTurns=20`），而这里此前只压首块。
+  - ★ 两个块**成分不同，处理也不能一样**：refresh 块 = 页面清单（**要留**）+
+    TOOL_GUIDE（实测 1,743 字符，与首块逐字相同）。清单是**唯一在变**的部分，
+    也是这个块存在的理由；压掉它等于把一次"刷新"变成纯噪声注入。
+  - ★ **逐块就地替换**，不是整条正文换掉。第一版就是整条换成首块指针，于是同一段文本里
+    跟在后面的 refresh 块被**整块吃掉**（清单一声不响地没了）。这个 bug 是
+    `verify-hindsight-compact.mjs` 的"两个块同在"那条抓到的 —— 只测单块的夹具永远看不见它，
+    而宿主确实会把注入拼进同一条消息。
+  - 读不懂就**原样放过**（没有 Reminder 段的块不压）：少压一次只是多花点 token，
+    压错一次会把清单一起带走。两种失败的代价不对称。
+  - 压缩逻辑从 `index.js` 的闭包里**提出来**成 `lib/hindsight-compact.js`（纯函数）——
+    埋在闭包里就测不到，而"改了没生效"正是这一路的高发形态。
+
+- **`verify:hindsight-compact`**：两个注入块的自检。夹具里的 TOOL_GUIDE
+  **直接从本机 Hindsight 运行时里抠**，不是手写的近似品 —— 这里要测的恰恰是
+  "上游长什么样我们认不认"，手写夹具会随上游改文案而失去意义。
+  实测收益：首块 2312 → 196 字符；refresh 块 2057 → 338 字符（**省 1719**，清单一行不少）。
+
+- **`verify-sessions` 补上两个回归夹具**：v3 命名的会话文件必须能被列出，
+  `tool/ptc-dispatch` 必须被算成工具调用。
+
+### 变更
+
+- **`lib/compat.js` 的 `REQUIRED_APIS` 增加观察项 `sessionQuery`**（宿主 0.1.5-rc.2 起有
+  `@deepseek-ai/dsh-session-query` + `-sqlite`，SQLite FTS5）。本插件**尚未依赖**它，
+  所以标成 `optional` —— 可选 ≠ 必需，混进 `missing` 会让人误判严重性。
+  摆进报告的理由：它正是"会话文件改个名就把历史读丢"这类故障的正解。
+  （本轮实测过：从插件位置 `require.resolve('@deepseek-ai/dsh-session-query')` 失败，
+  所以没有改读层实现，只把它变成可见的。）
+
 ## [0.2.0] — 2026-09-16
 
 ### 修复

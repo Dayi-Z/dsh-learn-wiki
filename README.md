@@ -117,6 +117,11 @@ node -e "..."   # 或直接让 agent 调 wiki_sessions { action: "brief" }
 - **会话文件是多帧 zstd 拼接**（每次追加写一帧）。★ `zlib.createZstdDecompress()`
   **不能**用——它和 gzip 不一样，遇到第二帧就停（实测只解出第一帧的 170 字符）。
   必须自己按魔数 `28 B5 2F FD` 切帧，逐个解。
+- ★ **文件名里带格式版本**：`session.jsonl.zstd`（v0）或 `session.v3.jsonl.zstd`（v3，
+  宿主 0.1.5-rc.2 起）。判定用**整名锚定的正则**，不靠 `includes`——目录里躺着
+  `session.jsonl.zstd.bak-20260915`、`...frame-broken-bak` 这类备份，用 `includes`
+  会把**已经判定损坏的文件**重新塞回历史。版本本身从**事件流头部**的 `version` 读，
+  文件名只是副本；副本与真源不一致时信真源，读不到就给 `null`（`0` 是 v0，"不知道"不是 v0）。
 - **列会话只读第一帧**（头部里有 id / cwd / 创建时间 / 委托深度）。全量解码一个会话
   实测要解 11M 字符，列表动作用不起。
 - **索引带缓存与预算**：摘要按文件 `(size, mtime)` 缓存进 `<wikiRoot>/.index/sessions.json`，
@@ -130,6 +135,7 @@ node -e "..."   # 或直接让 agent 调 wiki_sessions { action: "brief" }
 
 | 判据 | 为什么 |
 |---|---|
+| 内层派发有**两个**事件名（`tool/code-dispatch` / `tool/ptc-dispatch`）都要认 | 宿主 0.1.5-rc.2 起 Code Mode 的派发改叫 `ptc-dispatch`，载荷结构一样。漏掉之后 `toolsUsed` 只剩 `run_code`、`filesTouched` 全空、`failures` 为 0——摘要会**反过来说话**（"这次没改过文件也没踩过坑"），而 v3 会话不再写流式 chunk，这些派发事件是唯一线索 |
 | 外层 `run_code` 的失败是内层派发的**复述**，不重复计数 | 实测 124 次内层失败对应 122 次外层失败，几乎 1:1。两个都记 = 同一堵墙数两次，阈值全部失真。关联是精确的：`dispatch.rootCallId === tool/call.callId` |
 | 退出码标记只对 **shell 工具**算数 | 759 条带非零退出标记的结果里 51 条来自非 shell 工具——最多的是 `job_output`（35 条，它返回的就是另一个进程的 stdout）。那些是回显，不是自己失败 |
 | 没有**可描述症状**的失败不成"墙"，但计入 `weakFailures` | 一个命令以非零退出、输出却全是 `PASS` 行时，"指纹"就是那堆无关日志（真实出现过的例子：指纹是 `ui: /learn-wiki 已注册 … PASS`）。既搜不出来也无从推理。**但不能静默丢**，所以计数照记 |

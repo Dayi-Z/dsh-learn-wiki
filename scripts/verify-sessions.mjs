@@ -9,7 +9,7 @@
 import { rm, mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import zlib from 'node:zlib'
-import { listSessions, readSessionEvents, readSessionHeader, decodeSession, isSubagentHeader } from '../lib/session-store.js'
+import { listSessions, readSessionEvents, readSessionHeader, decodeSession, isSubagentHeader, sessionFormatVersion, FILE_RE } from '../lib/session-store.js'
 import { digestSession, renderDigest, sessionTranscript } from '../lib/session-digest.js'
 import { loadSessionIndex, collectWalls } from '../lib/session-index.js'
 import { ensureRepo } from '../lib/wiki.js'
@@ -34,17 +34,30 @@ const dispatch = (rootCallId, name, args, { text = '', isError = false } = {}) =
   type: 'tool/code-dispatch', seq: 4,
   data: { rootCallId, parentCallId: rootCallId, subCallId: rootCallId + ':code:1', name, arguments: args, isError, content: [{ type: 'text', text }] },
 })
+// v3 会话里的内层派发叫 ptc-dispatch（宿主 0.1.5-rc.2 起）。
+// 载荷结构相同，只有 type 不一样 —— 夹具也照这个差别造，别多造差异。
+const ptcDispatch = (rootCallId, name, args, { text = '', isError = false } = {}) => ({
+  type: 'tool/ptc-dispatch', seq: 4,
+  data: { rootCallId, parentCallId: rootCallId, subCallId: rootCallId + ':ptc:1', name, arguments: args, isError, content: [{ type: 'text', text }] },
+})
 const result = (callId, text, isError = false) => ({
   type: 'tool/result', seq: 5,
   data: { turn: 1, step: 1, message: { source: { kind: 'tool', callId }, content: [{ type: 'tool-result', toolCallId: callId, content: [{ type: 'text', text }], isError }] } },
 })
 
-function writeSessionFile(dir, header, events) {
+/**
+ * 造一个会话文件。
+ *
+ * ★ `version` 参数决定**文件名**：宿主 0.1.5-rc.2 起把会话格式版本写进了文件名
+ *   （`session.v3.jsonl.zstd`，无版本 = v0）。这里必须能造出两种名字，
+ *   否则"新版会话读不读得到"这件事根本测不到 —— 而它正是实测漏掉的那条。
+ */
+function writeSessionFile(dir, header, events, version = 0) {
   const lines = [JSON.stringify(header), ...events.map(e => JSON.stringify(e))]
   // ★ 一帧一行地压，再拼起来 —— 这正是真实文件的形态（每次追加写一帧）。
   //   用一帧写完整文件就测不到"多帧解码"这件事了，而那是这一层最容易错的地方。
   const buf = Buffer.concat(lines.map(l => zlib.zstdCompressSync(Buffer.from(l + '\n', 'utf8'))))
-  const p = join(dir, 'session.jsonl.zstd')
+  const p = join(dir, version > 0 ? 'session.v' + version + '.jsonl.zstd' : 'session.jsonl.zstd')
   return { p, buf }
 }
 
@@ -87,6 +100,31 @@ await writeFile(fb.p, fb.buf)
 const fc = writeSessionFile(join(SROOT, '--D-Other--', 'sess-ccc'), HEAD_OTHER, [userMsg('别的项目')])
 await writeFile(fc.p, fc.buf)
 
+// ── 新版会话（v3 命名 + tool/ptc-dispatch）────────────────────────────
+//
+// 这一组夹具是**实测缺口的回归**（2026-09-16）：宿主把会话文件改名成
+// session.v3.jsonl.zstd 之后，精确字符串匹配让新版会话全部消失，
+// 而这是"不报错、只是历史不再增长"的形态，不测就永远看不见。
+const HEAD_V3 = { type: 'session', version: 3, id: 'sess-v3', createdAt: 4000, cwd: 'D:\\Proj', delegationDepth: 0, agentPreset: 'ptc' }
+const evV3 = [
+  { type: 'session/title', seq: 0, data: { title: 'PTC 会话' } },
+  { type: 'turn/start', seq: 0, data: {} },
+  userMsg('PTC 模式下改个文件'),
+  asstMsg([{ type: 'text', text: '动手。' }]),
+  toolCall('p-1', 'run_code', { code: 'x' }),
+  ptcDispatch('p-1', 'edit', { file_path: 'D:/Proj/b.js', old_string: 'v1' }, { text: 'Error: old_string was not found in "D:/Proj/b.js"', isError: true }),
+  ptcDispatch('p-1', 'edit', { file_path: 'D:/Proj/b.js', old_string: 'v2' }, { text: 'Error: old_string was not found in "D:/Proj/b.js"', isError: true }),
+  result('p-1', 'done'),
+]
+await mkdir(join(SROOT, '--D-Proj--', 'sess-v3'), { recursive: true })
+const fv3 = writeSessionFile(join(SROOT, '--D-Proj--', 'sess-v3'), HEAD_V3, evV3, 3)
+await writeFile(fv3.p, fv3.buf)
+
+// 目录里真实存在这类备份（实测）：它们**不是**会话，绝不能被当成会话读进来 ——
+// 那等于把已经判定损坏的文件重新塞回历史。用精确锚定的正则挡掉。
+await writeFile(join(SROOT, '--D-Proj--', 'sess-v3', 'session.jsonl.zstd.bak-20260915'), 'not a session')
+await writeFile(join(SROOT, '--D-Proj--', 'sess-aaa', 'session.v3.jsonl.zstd.frame-broken-bak'), 'not a session')
+
 console.log('=== 会话存储 ===')
 const ev = readSessionEvents(fa.p)
 check('★ 多帧 zstd 全部解出（不是只解第一帧）', ev.length === evA.length + 1, '解出 ' + ev.length + ' 条, 期望 ' + (evA.length + 1))
@@ -96,13 +134,40 @@ check('只读第一帧也能拿到头', h?.id === 'sess-aaa' && h.cwd === 'D:\\P
 check('isSubagentHeader 认得子代理', isSubagentHeader(HEAD_SUB) === true && isSubagentHeader(HEAD_A) === false)
 
 const all = listSessions({ root: SROOT })
-check('默认排除子代理', all.length === 2 && !all.some(s => s.id === 'sub-bbb'), all.map(s => s.id).join(','))
+check('默认排除子代理', all.length === 3 && !all.some(s => s.id === 'sub-bbb'), all.map(s => s.id).join(','))
 const withSub = listSessions({ root: SROOT, includeSubagents: true })
-check('includeSubagents 时包含', withSub.length === 3, withSub.map(s => s.id).join(','))
+check('includeSubagents 时包含', withSub.length === 4, withSub.map(s => s.id).join(','))
 check('★ 按**头里的 cwd 字段**过滤，不靠目录名反推',
-  listSessions({ root: SROOT, cwd: 'D:\\Proj' }).length === 1
-  && listSessions({ root: SROOT, cwd: 'D:\\Proj' })[0].id === 'sess-aaa')
-check('按时间倒序', all[0].id === 'sess-aaa', all.map(s => s.id + '@' + s.createdAt).join(','))
+  listSessions({ root: SROOT, cwd: 'D:\\Proj' }).length === 2
+  && listSessions({ root: SROOT, cwd: 'D:\\Proj' }).every(s => s.cwd === 'D:\\Proj'))
+check('按时间倒序', all[0].id === 'sess-v3', all.map(s => s.id + '@' + s.createdAt).join(','))
+
+// ── 文件命名（新版带版本号）──────────────────────────────────────────
+//
+// 这一组是**实测缺口的回归**：宿主改名成 session.v3.jsonl.zstd 之后，
+// 精确字符串匹配让所有新版会话消失，而它不报错、只是历史不再增长。
+const names = [
+  ['session.jsonl.zstd', true, 'v0 老命名'],
+  ['session.v3.jsonl.zstd', true, 'v3 新命名'],
+  ['session.v12.jsonl.zstd', true, '两位数版本也不能漏'],
+  ['session.jsonl.zstd.bak-20260915', false, '备份不是会话（实测目录里就有）'],
+  ['session.jsonl.zstd.frame-broken-bak', false, '已判损坏的备份'],
+  ['session.v3.jsonl.zstd.frame-broken-bak', false, 'v3 的损坏备份'],
+  ['notes.jsonl.zstd', false, '别的文件名'],
+]
+const wrong = names.filter(([n, want]) => FILE_RE.test(n) !== want).map(([n]) => n)
+check('★ 会话文件名按**整名锚定**匹配（放行 vN、挡住备份）', wrong.length === 0, wrong.length ? '判错: ' + wrong.join(', ') : names.length + ' 个名字全部判对')
+
+const v3Row = all.find(s => s.id === 'sess-v3')
+check('★ 新版命名的会话**读得到**（这是本轮修的那个静默失效）', !!v3Row, all.map(s => s.id).join(','))
+check('版本从**事件流头部**读，不从文件名反推', v3Row?.version === 3, 'version=' + v3Row?.version)
+check('老会话报 v0', all.find(s => s.id === 'sess-aaa')?.version === 0)
+check('★ 版本读不到时是 null，不是 0（"不知道"与"v0"必须分得开）',
+  sessionFormatVersion(null, 'weird-name.zstd') === null
+  && sessionFormatVersion(null, 'session.jsonl.zstd') === 0
+  && sessionFormatVersion(null, 'session.v7.jsonl.zstd') === 7)
+check('头部读得出时以头部为准（副本与真源不一致时信真源）',
+  sessionFormatVersion({ version: 3 }, 'session.jsonl.zstd') === 3)
 
 console.log('')
 console.log('=== 摘要 ===')
@@ -135,6 +200,26 @@ check('两类加起来 = 全部失败', d.walls.reduce((n, w) => n + w.count, 0)
   d.walls.reduce((n, w) => n + w.count, 0) + '+' + d.counts.weakFailures + ' vs ' + d.counts.failures)
 check('renderDigest 能渲染', renderDigest(d).includes('会话 sess-aaa'))
 
+// ── v3 会话的内层派发（tool/ptc-dispatch）────────────────────────────
+//
+// 与上面那组同源：宿主把内层派发从 tool/code-dispatch 改名成 tool/ptc-dispatch。
+// 漏掉它的后果不是"少几张卡片"，而是**摘要会反过来说话** ——
+// toolsUsed 只剩 run_code、filesTouched 全空、failures 为 0，
+// 读起来像"这次没改过文件也没踩过坑"。
+const ev3 = readSessionEvents(fv3.p)
+const h3 = readSessionHeader(fv3.p)
+const d3 = digestSession(ev3, h3)
+check('★ v3 的 ptc-dispatch 被认成工具调用（漏掉会让摘要反过来说话）',
+  d3.counts.toolCalls === 3, 'toolCalls=' + d3.counts.toolCalls + '（2 次内层 edit + 1 次外层 run_code 结果）')
+check('★ 内层调用进了 toolsUsed', d3.toolsUsed.edit === 2 && d3.toolsUsed.run_code === 1, JSON.stringify(d3.toolsUsed))
+check('★ 内层调用带的文件进了 filesTouched（漏掉的话这里会是空的）',
+  Object.keys(d3.filesTouched).some(f => f.endsWith('b.js')), JSON.stringify(Object.keys(d3.filesTouched)))
+check('★ ptc 的 isError 被认成失败，且两层同一堵墙只数两次',
+  d3.counts.failures === 2, 'failures=' + d3.counts.failures)
+check('★ ptc 会话也能认出这堵墙', d3.walls.some(w => /old_string was not found/.test(w.sig) && w.count === 2),
+  JSON.stringify(d3.walls.map(w => ({ s: w.sig.slice(0, 40), n: w.count }))))
+check('★ 头部 version=3 如实带进摘要可判断的形状（不是猜出来的）', h3?.version === 3, 'version=' + h3?.version)
+
 console.log('')
 console.log('=== 取材规则：实时与历史必须同一套 ===')
 const tr = sessionTranscript(ev, {})
@@ -152,11 +237,11 @@ const t0 = Date.now()
 // （默认 includeSubagents=false 时只有 2 个 —— 那是对的，第一版我按 3 写错了。）
 const i1 = await loadSessionIndex(ROOT, { sessionsRoot: SROOT, cwd: null, maxNew: 2, includeSubagents: true })
 check('第一次只摘预算内的', i1.digested === 2, 'digested=' + i1.digested)
-check('★ 没摘的如实报出来，不假装全都索引了', i1.pending === 1 && i1.scanned === 3, JSON.stringify({ pending: i1.pending, scanned: i1.scanned }))
+check('★ 没摘的如实报出来，不假装全都索引了', i1.pending === 2 && i1.scanned === 4, JSON.stringify({ pending: i1.pending, scanned: i1.scanned }))
 const i2 = await loadSessionIndex(ROOT, { sessionsRoot: SROOT, cwd: null, maxNew: 2, includeSubagents: true })
-check('第二次读缓存 + 继续推进', i2.cached === 2 && i2.digested === 1 && i2.pending === 0, JSON.stringify({ cached: i2.cached, digested: i2.digested, pending: i2.pending }))
+check('第二次读缓存 + 继续推进', i2.cached === 2 && i2.digested === 2 && i2.pending === 0, JSON.stringify({ cached: i2.cached, digested: i2.digested, pending: i2.pending }))
 const i3 = await loadSessionIndex(ROOT, { sessionsRoot: SROOT, cwd: null, maxNew: 0, includeSubagents: true })
-check('maxNew=0 时只读缓存，不摘新的', i3.digested === 0 && i3.cached === 3, JSON.stringify({ cached: i3.cached, digested: i3.digested }))
+check('maxNew=0 时只读缓存，不摘新的', i3.digested === 0 && i3.cached === 4, JSON.stringify({ cached: i3.cached, digested: i3.digested }))
 check('索引耗时合理（缓存命中不该重算）', Date.now() - t0 < 20000, (Date.now() - t0) + 'ms')
 
 const walls = collectWalls(i3.digests)
