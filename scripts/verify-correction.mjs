@@ -106,7 +106,7 @@ console.log('── 记录形状 ──')
     corrected: ['page-x'], origin: 'agent', depth: 0, now: 1700000000000,
   })
   check('★ 与挣扎记录同形（wiki_struggle / 界面 / wiki_sessions 已经在读那个形状）',
-    typeof rec.ts === 'number' && typeof rec.sessionId === 'string'
+    typeof rec.ts === 'string' && typeof rec.sessionId === 'string'
     && Array.isArray(rec.signals) && rec.signals[0].type === 'user-correction',
     JSON.stringify(Object.keys(rec)))
   check('★ 信号类型已登记进 SIGNAL_TYPES（否则读的一方认不出它）',
