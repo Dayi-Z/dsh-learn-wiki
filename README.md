@@ -72,10 +72,35 @@ dsh plugin --profile web add link:D:/Harness/dsh-learn-wiki
 | `gapTrigger` | `'struggle'` | 什么触发补料：`struggle`（默认）\| `miss` \| `both` \| `off` |
 | `gapTriggerSignals` | `['repeat-failure','recurring-error']` | 哪些挣扎信号适合联网（只认带**可搜错误文本**的那些） |
 | `hitThreshold` | `0.20` | score ≥ 此值 → hit（注入正文） |
-| `weakThreshold` | `0.13` | score ≥ 此值 → weak（只注入标题索引）；低于 → miss |
+| `weakThreshold` | `0.15` | score ≥ 此值 → weak（只注入标题索引）；低于 → miss。见下方"阈值是量出来的" |
 | `injectOncePerSession` | `true` | 内容不变则只注入一次（KV cache 友好） |
 | `maxAcquisitionsPerRun` | `2` | 单次后台补料最多处理的缺口数 |
 | `webMaxResults` | `5` | 每次联网取多少条结果 |
+
+
+#### 阈值是量出来的，不是拍的
+
+打分依赖语料规模，所以**语料显著增长后必须重跑标定**。这条规则有可执行的形状：
+
+```bash
+node scripts/calibrate-real.mjs        # 整体：正例/负例分布与 gap
+node scripts/calibrate-thresholds.mjs  # 逐条 + 扫阈值，回答"该不该调"
+```
+
+最近一次重标定（2026-09-16，66 页语料 / 13 正例 / 5 负例）抓到的**不是阈值问题**：
+
+| 负例 | 修前 | 修后 | 根因 |
+|---|---|---|---|
+| 「Rust 的 borrow checker 报错怎么绕过」 | 0.8364 | 0.0524 | **检索到了自己** —— 命中的那一页正文里逐字引用了这条标定查询 |
+| 「如何配置 kubernetes sidecar 注入策略」 | 0.223 | 0.1493 | kubernetes 等词**整个语料里都不存在**，而 sidecar+注入+策略 恰好同页 |
+
+两条修法都不是调阈值：前者给"关于本工具自己"的页打 `meta` 标签、不参与自动注入
+（显式 `wiki_recall` 仍查得到）；后者给"查询里有语料根本没有的**标识符**"加折扣。
+修完 Gap = **+0.013**（正例最低 0.1621 / 负例最高 0.1493）—— 薄，所以 `verify-core` 里
+留了哨兵断言：超线就红，逼着重标定而不是把上限改高。
+
+> **给这个知识库写页面时**：如果一页讲的是"本插件自己的打分/检索/标定"，请打上 `meta` 标签。
+> 否则它会跟标定查询共享同一批词，把标定本身污染掉。
 
 ## 工具
 
@@ -368,6 +393,8 @@ Phase 1（host 半）与 Phase 2（client 半）均已完成并验证：
 
 - host：自动注入 / 三档判定（hit·weak·miss）/ 挣扎检测 / 后台限流补料 / 使用证据与强化因子
 - client：能力（工具+技能，按族折叠）/ 知识（可展开、可筛选）/ **分拣**（回收站与已拒绝的恢复/删除）/ 补料 四个页签
+  - 另外注册了 `tool.call.toolview`（keyed on `wiki_recall`）：把三档判定与命中页做成对话内卡片，
+    而不是让通用卡片渲染一大坨 JSON。解析不了就回落通用卡片 —— 不画半懂的卡。
 - 界面可离线自检与预览（见上），**不需要开浏览器、不需要重启 DSH**
 
 自检：**24 个套件，全部离线可跑**（`npm run verify:*`）。最大的那个是结构级渲染测试
