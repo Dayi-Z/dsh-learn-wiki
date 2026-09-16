@@ -122,6 +122,56 @@
 - **`fetchMaxChars` 4000 → 12000**：实测一篇 zlib 文档能剥出 9 万字符正文，
   4000 的预算**先被导航吃掉**，答案根本没进蒸馏提示词。
 
+
+### 修复（检索层：两条负例越线，根因都不是阈值）
+
+语料长到 66 页时 `verify-core` 的两条哨兵断言变红。查下来是两个不同的真问题：
+
+- **自检索**：负例「Rust 的 borrow checker 报错怎么绕过」拿到 **0.8364**（比最高正例还高）——
+  它命中的是 `note-ca2525` **自己**：那一页讲的就是打分缺陷，正文里逐字引用了这条标定查询。
+  - 修法不是打分，是**去向**：给这类"关于本工具自己"的页打 `meta` 标签，
+    `recallable()` 默认把它们排除在**自动注入**之外；显式 `wiki_recall` 传 `includeMeta: true`
+    仍可查（与"隔离"同一处置原则：只掐自动那条路）。0.8364 → **0.0524**。
+  - 标定脚本也改成用 `recallable()` 的默认池 —— 度量的必须是线上真正会看到的东西。
+
+- **标识符缺词**：「如何配置 kubernetes sidecar 注入策略」的 7 个稀有关键词里，
+  kubernetes / 如何 / 何配 三个**整个语料里 df=0**，而 sidecar+注入+策略 恰好同页 → 越过 hit 线。
+  - 修法是给"查询里有语料根本没有的词"加折扣。**第一版写错了**：对所有缺词一视同仁，
+    于是中文正例被误伤 —— 中文走字符二元组，本来就会切出「何配」「入策」这种语料里
+    不存在的组合，把它们算成缺词等于系统性惩罚所有中文查询（实测一条真实正例从 hit 掉到 weak）。
+  - 正确判据：**只算标识符型缺词**（`/^[a-z0-9_]+$/`）。
+
+- 重标定结果（`scripts/calibrate-thresholds.mjs`，可复现）：
+  正例最低 **0.1621** / 负例最高 **0.1493** → Gap **+0.013** —— **第一次转正**，但很薄。
+  `weakThreshold` 0.13 → **0.15**（扫出来的：0.15 时负例零注入 + 正例 13/13 全注入；0.18 开始漏正例）。
+
+### 修复（两个"静默跳过"的自检）
+
+- **渲染测试套件从来没跑过**。`scripts/lib/ui-harness.mjs` 里的应用路径写的是
+  `D:/Harness/dsh-desktop/resources/app/node_modules`，而应用实际在
+  `.../dsh-desktop/DSH Desktop/resources/app/node_modules`（中间那个**带空格的子目录**）——
+  于是 `hasReact()` 恒为假，`verify:render` 打了 "SKIP 无法做渲染测试" 就退出。
+  诚实，但等于三个渲染断言套件**一条都没执行过**。现在按候选列表找真实存在的那份；找不到就红。
+  - 这与我上一轮修 `verify-client-tokens.mjs` 是**同一个错误**，只是那次是 token 核对静默跳过。
+
+### 新增
+
+- **`wiki_recall` 的对话内卡片**（`tool.call.toolview`，keyed on `wiki_recall`）。
+  通用工具卡片把结论渲染成一大坨 JSON，而三档判定（hit/weak/miss）正是最该一眼看懂的东西。
+  - 判据抽成纯函数 `recallCardModel`：**解析不了就返回 null**，让宿主回落通用卡片 ——
+    一张说错话的卡片比一张难看的卡片坏得多。
+  - 样式只用既有 token 类，且**不自带底色**（嵌在宿主工具行里会与那一行的底打架）。
+  - 已核实这不是死代码：宿主把 `run_code` 里的嵌套调用也渲染成 `ToolResultNode`，
+    所以在这个"一切走 run_code"的部署里同样生效。
+
+- **`verify-core` 增加配置键漂移断言**：`lib/` 里读到的每个 `cfg.*` 键都必须在 `DEFAULTS` 里声明过。
+  - 这条是被一个真实缺陷逼出来的：`acquire.js` 读了 `cfg.normalizeSearchQuery`，
+    而 `DEFAULTS` 里根本没有这个键 —— 于是"关掉查询清洗"这个开关**只存在于代码里**，
+    写进 `wiki.config.json` 不会有任何效果，而且不报错。
+
+- `scripts/calibrate-thresholds.mjs`：逐条打印正负例分数 + 扫阈值，
+  让"该不该调阈值"变成一个可以看数据回答的问题。
+- `scripts/calibrate-variants.mjs`：在同一份标注集上对比几个相似度公式（保留为探索工具）。
 ### 新增（联网）
 
 - `scripts/verify-web-acquire.mjs`（`verify:web`）：抽取、prose 判据、壳页、配对标签树、

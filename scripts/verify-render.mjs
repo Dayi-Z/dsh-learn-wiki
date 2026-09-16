@@ -60,6 +60,79 @@ if (!M.__components || !M.__logic) { console.log('\n无法继续'); process.exit
 
 const { toolGroups, toolRowsVisible, familyOpen, knowledgeView, KFILTERS, pendingTotal } = M.__logic
 
+// ── 对话内 wiki_recall 卡片 ──
+//
+// 这一组测两件事，分开测：
+//   · 判据（纯函数）：给一段真实的工具结果，卡片该说什么；解析不了该不该回落；
+//   · 渲染（真 React）：它画得出来、不崩、关键信息确实在 HTML 里。
+// 混在一起测的代价是"渲染没崩"会掩盖"其实什么都没画"—— 一张空卡片不报错。
+console.log('')
+console.log('── wiki_recall 卡片 ──')
+{
+  const { recallCardModel } = M.__logic
+  const { RecallCard } = M.__components
+
+  // 夹具：宿主真正会交给 toolview 的那个 block 形状。
+  // arguments 是 **JSON 字符串**（与会话日志里一致），结果在 tool-result 的 content[0].text。
+  const mkBlock = (name, args, resultText) => ({
+    callId: 'c1',
+    content: [
+      { type: 'tool-call', id: 'c1', name, arguments: JSON.stringify(args) },
+      ...(resultText === null ? [] : [{ type: 'tool-result', toolCallId: 'c1', content: [{ type: 'text', text: resultText }], isError: false }]),
+    ],
+  })
+  const RECALL = {
+    bucket: 'hit', bestScore: 0.42, totalRecallable: 12,
+    hit: [
+      { id: 'a-page', title: 'A 页', category: 'lesson', confidence: 0.8, score: 0.42, usage: { class: 'confirmed' }, sources: ['u1', 'u2'], body: 'x' },
+    ],
+    weak: [{ id: 'b-page', title: 'B 页', category: 'fact', confidence: 0.4, score: 0.15, usage: { class: 'new' }, sources: ['u3'] }],
+  }
+
+  const model = recallCardModel(mkBlock('wiki_recall', { query: 'zstd 多帧' }, JSON.stringify(RECALL)))
+  check('★ 认得 wiki_recall 并解出模型', !!model && model.bucket === 'hit', JSON.stringify(model && model.bucket))
+  check('查询词被带出来（卡片要能回答"我搜了什么"）', model.query === 'zstd 多帧', model.query)
+  check('两类命中分别计数', model.hitCount === 1 && model.weakCount === 1, model.hitCount + '/' + model.weakCount)
+  check('★ 页的顺序与档位按结果来（hit 在前，weak 在后）',
+    model.pages.map(p => p.bucket).join(',') === 'hit,weak', model.pages.map(p => p.bucket).join(','))
+  check('带出证据与状态（分数/来源数/使用类别）',
+    model.pages[0].score === 0.42 && model.pages[0].sourceCount === 2 && model.pages[0].usageClass === 'confirmed')
+
+  check('★ 别的工具交给通用卡片（返回 null，不画半懂的卡）',
+    recallCardModel(mkBlock('wiki_review', {}, '{}')) === null)
+  check('★ 还在跑（没有结果）→ 返回 null，交给通用卡片去转圈',
+    recallCardModel(mkBlock('wiki_recall', { query: 'x' }, null)) === null)
+  check('★ 结果不是 JSON → 返回 null（解析不了就别猜）',
+    recallCardModel(mkBlock('wiki_recall', { query: 'x' }, 'not json at all')) === null)
+  check('★ bucket 缺失或非法 → 返回 null（没有判定就不该画判定）',
+    recallCardModel(mkBlock('wiki_recall', {}, JSON.stringify({ hit: [], weak: [] }))) === null)
+  check('空 block / null / 垃圾输入都不炸',
+    recallCardModel(null) === null && recallCardModel({}) === null && recallCardModel({ content: 'x' }) === null)
+  check('★ arguments 已是对象时也认（宿主形状变过）',
+    !!recallCardModel({ content: [
+      { type: 'tool-call', name: 'wiki_recall', arguments: { query: 'q' } },
+      { type: 'tool-result', content: [{ type: 'text', text: JSON.stringify(RECALL) }] },
+    ] }))
+
+  // ── 渲染 ──
+  const html = renderToStaticMarkup(h(RecallCard, { block: mkBlock('wiki_recall', { query: 'zstd 多帧' }, JSON.stringify(RECALL)) }))
+  check('★ 渲染出了判定（不是一张空卡片）', /命中/.test(html) && /注入正文/.test(html), html.slice(0, 120))
+  check('渲染里带查询词', html.includes('zstd 多帧'))
+  check('渲染里带两页的标题', html.includes('A 页') && html.includes('B 页'))
+  check('渲染里带分数与可召回页数', /0\.420/.test(html) && /12/.test(html))
+  check('★ 未命中时给出可执行的下一步（而不是只说"没有"）',
+    (() => {
+      const miss = renderToStaticMarkup(h(RecallCard, { block: mkBlock('wiki_recall', { query: 'q' }, JSON.stringify({ bucket: 'miss', bestScore: 0.02, hit: [], weak: [], totalRecallable: 5, note: '未命中：没有已固化知识。' })) }))
+      return /未命中/.test(miss) && /已固化知识/.test(miss)
+    })())
+  check('★ 非 wiki_recall 的 block 渲染成空（而不是崩）',
+    renderToStaticMarkup(h(RecallCard, { block: mkBlock('pwsh', {}, '{}') })) === '')
+  check('★ 解析不了的 block 渲染成空（回落由宿主负责）',
+    renderToStaticMarkup(h(RecallCard, { block: { content: [{ type: 'tool-call', name: 'wiki_recall', arguments: '{bad' }] } })) === '')
+  check('卡片没有引入自带底色（嵌在宿主行里会打架）',
+    !/lw-recall\{[^}]*background:/.test(M.__css), (M.__css.match(/lw-recall\{[^}]*\}/) || [''])[0].slice(0, 90))
+}
+
 // ── 1. 纯逻辑（不经 React） ──
 console.log('')
 console.log('── 纯逻辑（不经 React） ──')

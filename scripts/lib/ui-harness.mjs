@@ -21,9 +21,31 @@ export const HERE = fileURLToPath(new URL('.', import.meta.url))
 export const PLUGIN_ROOT = fileURLToPath(new URL('../../', import.meta.url))
 export const CLIENT_PATH = fileURLToPath(new URL('../../client/client.js', import.meta.url))
 
-/** DSH 的 node_modules —— react / react-dom 从**宿主自己**那份取，不另装一份。 */
-export const APP_MODULES = process.env.DSH_APP_MODULES
-  || 'D:/Harness/dsh-desktop/resources/app/node_modules'
+/**
+ * DSH 的 node_modules —— react / react-dom 从**宿主自己**那份取，不另装一份。
+ *
+ * ★ 路径要写**真实装的样子**。这里原先写的是
+ *   `D:/Harness/dsh-desktop/resources/app/node_modules`
+ *   而应用实际在 `D:/Harness/dsh-desktop/DSH Desktop/resources/app/node_modules`
+ *   —— 中间那个**带空格的子目录**。于是 hasReact() 恒为假，渲染测试打了
+ *   "SKIP 无法做渲染测试" 就退出了：诚实，但等于**三个渲染断言套件从来没跑过**。
+ *   （同一个错误在 scripts/verify-client-tokens.mjs 里也犯过一次，那次是 token 核对
+ *     静默跳过；这两处是同一天发现的，所以都摆在这里说明白。）
+ *
+ * 现在按顺序找第一个真实存在的，找不到就**红**（不假装通过）。
+ */
+const APP_MODULE_CANDIDATES = [
+  process.env.DSH_APP_MODULES,
+  'D:/Harness/dsh-desktop/DSH Desktop/resources/app/node_modules',
+  join(process.env.APPDATA || '', '..', 'Local', 'Programs', 'dsh-desktop', 'resources', 'app', 'node_modules'),
+  join(process.env.APPDATA || '', '..', 'Local', 'Programs', 'DSH Desktop', 'resources', 'app', 'node_modules'),
+].filter(Boolean)
+
+export const APP_MODULES = APP_MODULE_CANDIDATES.find((p) => existsSync(join(p, 'react')))
+  || APP_MODULE_CANDIDATES[0]
+
+/** 找过哪些路径 —— 失败时把候选列出来，否则只有一句"找不到"没法排查。 */
+export const APP_MODULE_CANDIDATES_TRIED = APP_MODULE_CANDIDATES
 
 export function hasReact() {
   return existsSync(join(APP_MODULES, 'react')) && existsSync(join(APP_MODULES, 'react-dom'))

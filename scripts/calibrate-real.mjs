@@ -8,8 +8,15 @@ import { loadPages } from '../lib/wiki.js'
 import { buildCorpus, scoreQuery, triage } from '../lib/recall.js'
 import { DEFAULTS } from '../lib/config.js'
 
+import { recallable } from '../lib/recall.js'
+
 const { pages } = await loadPages('D:/Harness/dsh-wiki')
-const pool = pages.filter(p => p.status === 'committed')
+// ★ 用**自动注入真正会看到的那个池**（recallable 默认排除 meta 页）：
+//   标定要度量的就是线上那一步的行为，用一个更宽的池测出来的数没有对应物。
+//   meta 页（"关于本工具自己"的页）会跟标定查询**共享同一批词**，把它算进来
+//   等于让度量对象污染度量本身 —— 实测它就干过这件事（见 lib/recall.js 里
+//   recallable 的注释）。
+const pool = recallable(pages, { includeMeta: false, includeQuarantined: false })
 const corpus = buildCorpus(pool)
 console.log('真实语料：' + pool.length + ' 页，词表 ' + corpus.df.size)
 console.log('当前阈值：hit=' + DEFAULTS.hitThreshold + ' weak=' + DEFAULTS.weakThreshold)

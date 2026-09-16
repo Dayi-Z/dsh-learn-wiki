@@ -386,6 +386,29 @@ window.__ModuleLoader__.load({
       '.lw-mledit{margin-top:2px}',
       '.lw-ml-t{flex:none;width:44px;color:var(--lw-fg3);font:var(--dsw-font-xxxs-11,11px/16px system-ui,sans-serif)}',
       '.lw-ml-note{color:var(--lw-fg4);font:var(--dsw-font-xxxs-11,11px/16px system-ui,sans-serif);line-height:1.6}',
+      // ── wiki_recall 的对话内卡片 ──
+      // 刻意**不自带背景**：它嵌在宿主既有的工具行里，自己再铺一层底色
+      // 会和宿主那一行的底打架（表现为一块突兀的色带）。只做排版与状态色。
+      '.lw-recall{display:flex;flex-direction:column;gap:6px;padding:2px 0;min-width:0}',
+      '.lw-recall-head{display:flex;align-items:center;gap:8px;min-width:0}',
+      '.lw-recall-verdict{flex:none;font:var(--dsw-font-xxxs-strong-11,600 11px/16px system-ui,sans-serif)}',
+      '.lw-recall-query{color:var(--lw-fg2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;flex:1}',
+      '.lw-recall-best{flex:none;font-variant-numeric:tabular-nums}',
+      '.lw-recall-sum{font:var(--dsw-font-xxxs-11,11px/16px system-ui,sans-serif);font-variant-numeric:tabular-nums}',
+      '.lw-recall-list{display:flex;flex-direction:column;gap:2px;border-top:1px solid var(--lw-line-soft);padding-top:4px}',
+      '.lw-recall-row{display:flex;flex-direction:column;gap:2px;padding:3px 0;min-width:0}',
+      '.lw-recall-rowhead{display:flex;align-items:center;gap:7px;min-width:0}',
+      '.lw-recall-dot{flex:none;font-size:var(--dsw-font-xxxs-11,11px)}',
+      '.lw-recall-title{color:var(--lw-fg);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}',
+      '.lw-recall-facts{display:flex;align-items:center;gap:5px;flex:none}',
+      '.lw-recall-chip{font:var(--dsw-font-xxxs-11,11px/16px system-ui,sans-serif);color:var(--lw-fg3);',
+      'font-variant-numeric:tabular-nums;padding:0 5px;border:1px solid var(--lw-line-soft);border-radius:99px}',
+      '.lw-recall-toggle{margin-left:auto;flex:none;cursor:pointer;background:none;border:0;padding:0 2px;',
+      'color:var(--lw-fg3);font:var(--dsw-font-xxxs-11,11px/16px system-ui,sans-serif)}',
+      '.lw-recall-toggle:hover{color:var(--lw-fg)}',
+      '.lw-recall-detail{display:flex;flex-direction:column;gap:2px;padding:2px 0 4px 16px;',
+      'font:var(--dsw-font-xxxs-11,11px/16px system-ui,sans-serif);color:var(--lw-fg3);line-height:1.6}',
+      '.lw-recall-note{font:var(--dsw-font-xxxs-11,11px/16px system-ui,sans-serif);line-height:1.6}',
     ].join('')
 
     var styled = false
@@ -2370,6 +2393,169 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /* ── wiki_recall 的对话内卡片 ───────────────────────────────────────────
+     *
+     * 为什么值得做：wiki_recall 的结论是三档判定（hit / weak / miss），而通用工具
+     * 卡片把它渲染成一大坨 JSON —— 那正是这个插件最需要人一眼看懂的东西。
+     *
+     * 机制（核实过，不是想当然）：宿主 dsh-client-ui-tool 的 ToolCall 用
+     *   renderSlot("tool.call.toolview", owner, { entryKey: toolName, fallback: GenericToolCard })
+     * keyed 命中就**替换**通用行。而 toolName 对 PTC 模式下 run_code 里的嵌套调用
+     * 同样是真实的（宿主把嵌套调用也渲染成 ToolResultNode），所以这个卡片在
+     * 当前这种「一切走 run_code」的会话里也会生效，不是死代码。
+     *
+     * 两条硬约束，都来自这个项目自己的教训：
+     *   1. **解析不了就返回 null**，让宿主回落到通用卡片。永远不要画一张半懂的卡片
+     *      —— 一张说错话的卡片比一张难看的卡片坏得多。
+     *   2. 样式只用既有 token 类（.lw-* / .c-*），与设置面板同一套变量。
+     */
+
+    /** 从 block 里取出这次调用的工具名与参数（形状与宿主一致：arguments 是 JSON 字符串）。 */
+    function recallCallOf(block) {
+      try {
+        if (!block || typeof block !== "object") return null
+        var content = block.content
+        if (!Array.isArray(content)) return null
+        for (var i = 0; i < content.length; i++) {
+          var part = content[i]
+          if (!part || part.type !== "tool-call") continue
+          var args = part.arguments
+          if (typeof args === "string") { try { args = JSON.parse(args) } catch (e) { args = null } }
+          return { name: String(part.name || ""), args: args && typeof args === "object" ? args : {} }
+        }
+        return null
+      } catch (e) { return null }
+    }
+
+    /** 结果文本：工具结果块里第一段 text。取不到返回空串。 */
+    function recallResultText(block) {
+      try {
+        var content = block && block.content
+        if (!Array.isArray(content)) return ""
+        for (var i = 0; i < content.length; i++) {
+          var part = content[i]
+          if (part && part.type === "tool-result" && Array.isArray(part.content)) {
+            for (var j = 0; j < part.content.length; j++) {
+              var c = part.content[j]
+              if (c && c.type === "text" && typeof c.text === "string") return c.text
+            }
+          }
+        }
+        return ""
+      } catch (e) { return "" }
+    }
+
+    /**
+     * 纯函数：block → 卡片模型，或 null（回落通用卡片）。
+     *
+     * 抽成纯函数是为了能被穷举断言 —— 这个文件里的组件很难在测试里点，
+     * 但"给一段真实的工具结果，卡片该说什么"是可以逐条钉死的。
+     */
+    function recallCardModel(block) {
+      var call = recallCallOf(block)
+      if (!call || call.name !== "wiki_recall") return null
+      var text = recallResultText(block)
+      if (!text) return null          // 仍在运行：还没有结果，交给通用卡片去转圈
+      var data = null
+      try { data = JSON.parse(text) } catch (e) { return null }   // 解析不了就别猜
+      if (!data || typeof data !== "object") return null
+      var bucket = String(data.bucket || "")
+      if (bucket !== "hit" && bucket !== "weak" && bucket !== "miss") return null
+      var hit = Array.isArray(data.hit) ? data.hit : []
+      var weak = Array.isArray(data.weak) ? data.weak : []
+      var pages = hit.concat(weak).map(function (p) {
+        return {
+          id: String((p && p.id) || ""),
+          title: String((p && p.title) || (p && p.id) || "(无标题)"),
+          score: Number(p && p.score) || 0,
+          confidence: Number(p && p.confidence) || 0,
+          category: String((p && p.category) || ""),
+          bucket: hit.indexOf(p) >= 0 ? "hit" : "weak",
+          usageClass: String((p && p.usage && p.usage.class) || "new"),
+          warning: (p && p.warning) || "",
+          sourceCount: Array.isArray(p && p.sources) ? p.sources.length : 0,
+          hasBody: !!(p && typeof p.body === "string" && p.body.length > 0),
+        }
+      })
+      return {
+        query: String((call.args && call.args.query) || ""),
+        bucket: bucket,
+        bestScore: Number(data.bestScore) || 0,
+        hitCount: hit.length,
+        weakCount: weak.length,
+        totalRecallable: Number(data.totalRecallable) || 0,
+        note: typeof data.note === "string" ? data.note : "",
+        pages: pages,
+      }
+    }
+
+    var RECALL_LABEL = {
+      hit: { text: "命中 · 注入正文", cls: "c-ok" },
+      weak: { text: "弱命中 · 只给标题", cls: "c-warn" },
+      miss: { text: "未命中 · 无可用知识", cls: "c-bad" },
+    }
+
+    /** 一行胶囊：分数 / 分类 / 证据。全部来自工具结果本身，不额外请求。 */
+    function RecallFacts(props) {
+      var p = props.page
+      var chips = [
+        h("span", { key: "s", className: "lw-recall-chip" }, p.score.toFixed(3)),
+        p.category ? h("span", { key: "c", className: "lw-recall-chip" }, p.category) : null,
+        h("span", { key: "conf", className: "lw-recall-chip" }, "置信 " + p.confidence.toFixed(2)),
+        p.sourceCount ? h("span", { key: "src", className: "lw-recall-chip c-dim" }, p.sourceCount + " 来源") : null,
+        p.usageClass && p.usageClass !== "new" ? h("span", { key: "u", className: "lw-recall-chip c-dim" }, p.usageClass) : null,
+      ].filter(Boolean)
+      return h("span", { className: "lw-recall-facts" }, chips)
+    }
+
+    function RecallRow(props) {
+      var p = props.page
+      var openState = useState(false)
+      var open = openState[0], setOpen = openState[1]
+      return h("div", { className: "lw-recall-row" },
+        h("div", { className: "lw-recall-rowhead" },
+          h("span", { className: "lw-recall-dot " + (p.bucket === "hit" ? "c-ok" : "c-warn") }, "●"),
+          h("span", { className: "lw-recall-title", title: p.id }, p.title),
+          h(RecallFacts, { page: p }),
+          p.warning ? h("span", { className: "lw-recall-chip c-bad", title: p.warning }, "⚠ 已隔离") : null,
+          h("button", {
+            type: "button",
+            className: "lw-recall-toggle",
+            "aria-expanded": open ? "true" : "false",
+            onClick: function () { setOpen(!open) },
+          }, open ? "收起" : "详情")
+        ),
+        open ? h("div", { className: "lw-recall-detail" },
+          h("div", { className: "lw-recall-kv" }, h("span", { className: "c-dim" }, "id"), " ", p.id),
+          h("div", { className: "lw-recall-kv" }, h("span", { className: "c-dim" }, "正文"), " ",
+            p.hasBody ? "本次调用已带回（模型已看到）" : "未带回（没传 includeBody）"),
+          p.warning ? h("div", { className: "lw-recall-kv c-bad" }, p.warning) : null
+        ) : null
+      )
+    }
+
+    /** 对话内卡片本体。数据全部来自这次调用的结果，不发任何请求。 */
+    function RecallCard(props) {
+      var model = useMemo(function () { return recallCardModel(props && props.block) }, [props && props.block])
+      if (!model) return null
+      var label = RECALL_LABEL[model.bucket] || RECALL_LABEL.miss
+      return h("div", { className: "lw-root lw-recall" },
+        h("div", { className: "lw-recall-head" },
+          h("span", { className: "lw-recall-verdict " + label.cls }, label.text),
+          h("span", { className: "lw-recall-query", title: model.query }, model.query || "(空查询)"),
+          h("span", { className: "lw-recall-best c-dim" }, "best " + model.bestScore.toFixed(3))
+        ),
+        h("div", { className: "lw-recall-sum c-dim" },
+          model.hitCount + " 命中 · " + model.weakCount + " 弱命中 · 可召回 " + model.totalRecallable + " 页"),
+        model.pages.length > 0
+          ? h("div", { className: "lw-recall-list" },
+            model.pages.map(function (p) { return h(RecallRow, { key: p.id || p.title, page: p }) }))
+          : h("div", { className: "lw-recall-note c-dim" }, model.note || "没有可召回的知识页。"),
+        model.pages.length > 0 && model.note
+          ? h("div", { className: "lw-recall-note c-dim" }, model.note)
+          : null
+      )
+    }
     // ── 插件契约 ──
     var name = 'dsh-learn-wiki'
     var inject = ['slots', 'locale', 'theme']
@@ -2381,6 +2567,21 @@ window.__ModuleLoader__.load({
       try {
         ctx.effect(function () { return ctx.locale.register(name, { zh: ZH, en: EN }) }, 'dsh-learn-wiki: dictionaries')
       } catch (e) { /* 字典注册失败不该挡住 UI */ }
+      // ── 对话内的 wiki_recall 卡片 ──
+      //
+      // 座位规则同下：注册到**未声明**的插槽会抛，所以必须用 inject 包住。
+      // 拿不到座位不影响面板 —— 卡片是附加品，不该有能力拖垮插件。
+      try {
+        ctx.slots.inject('tool.call.toolview', function () {
+          return ctx.slots.register({
+            name: 'tool.call.toolview',
+            key: 'wiki_recall',
+            locale: name,
+          }, RecallCard)
+        })
+      } catch (e) {
+        try { console.error('[dsh-learn-wiki] wiki_recall 卡片座位不可用：', e) } catch (err) {}
+      }
       ctx.slots.inject('sidebar.footer.action', function () {
         return ctx.slots.register({
           name: 'sidebar.footer.action',
@@ -2429,13 +2630,19 @@ window.__ModuleLoader__.load({
       CapabilitiesTab, ToolsSection, SkillsSection,
       KnowledgeTab, SupplyTab, PageDetail,
       ModelsTab, ModelListEditor, HarvestSection,
+      RecallCard,
     }
 
     /**
      * 纯逻辑也一并交出去：排序、分组、筛选不经过 React 就能被穷举断言。
      * 渲染测试只负责证明"这些结果能画出来且不崩"，两件事分开测。
      */
-    exports.__logic = { toolGroups, toolRowsVisible, familyOpen, knowledgeView, KFILTERS, tabKeys, pendingTotal, TABS }
+    exports.__logic = {
+      toolGroups, toolRowsVisible, familyOpen, knowledgeView, KFILTERS, tabKeys, pendingTotal, TABS,
+      // 卡片的**判据**单独交出：给一段真实的工具结果，卡片该说什么 —— 这是可以
+      // 逐条钉死的纯函数，而"卡片好不好看"不该混进测试里。
+      recallCardModel, recallCallOf, recallResultText,
+    }
 
     /**
      * 样式表原文。

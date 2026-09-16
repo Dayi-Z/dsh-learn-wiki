@@ -85,16 +85,64 @@ check('★ 完全无关的查询不得判为 hit（hit 会注入整页正文）'
 //
 //   本条断言随之改写：它现在要守的不是"别超过 0.25"，而是**不许再回到 hit**。
 //   下面那个数字是实测值，改动打分后必须重新量，不是拍出来的。
+//
+// ── 第二次重标定（2026-09-16，66 页语料）──
+//
+// 语料从 19 页涨到 66 页，两条负例**又越线了**，而且这次抓到的不是阈值问题：
+//
+//   1. 「Rust 的 borrow checker 报错怎么绕过」拿到 **0.8364** —— 比最高的正例还高。
+//      查下去发现它命中的是 **note-ca2525 自己**（那一页讲的就是打分缺陷，
+//      正文里逐字引用了这条标定查询当例子）。也就是说：**它检索到了自己**。
+//      修法不是调阈值，而是给这类"关于本工具自己"的页打 meta 标签、
+//      让它们不参与**自动注入**（recallable 的 includeMeta，显式 wiki_recall 仍可查）。
+//      → 0.8364 掉到 **0.0524**。
+//
+//   2. 「如何配置 kubernetes sidecar 注入策略」0.223 → 越线。根因不同：
+//      它 7 个稀有关键词里有 3 个（kubernetes / 如何 / 何配）**整个语料里都不存在**，
+//      而 sidecar+注入+策略 恰好同页。修法是给"查询里有语料根本没有的词"加折扣
+//      （见 lib/recall.js 里 absentRatio 那段）。
+//      → 0.223 掉到 **0.1120**（weak 线 0.13 以下，不再注入）。
+//
+//   第三条（同一次修）：折扣最初对**所有**缺词一视同仁，于是中文正例被误伤 ——
+//   中文靠字符二元组分词，本来就会切出「何配」「入策」这种语料里不存在的组合，
+//   把它们当成"缺词"等于系统性惩罚所有中文查询（实测 verify-subagent-guard 里
+//   一条真实正例从 hit 掉到 weak）。改成**只算标识符型缺词**（拉丁字母/数字）后，
+//   既挡住了 kubernetes，又不碰中文。
+//
+//   重标定后的整体形状（13 正例 / 5 负例，池 = 自动注入实际会看到的池）：
+//     正例最低 0.1621 / 负例最高 0.1493 → Gap **+0.013**（**第一次转正**，但很薄）
+//     top1 正确 11/13；weak 提到 0.15 后 **负例零注入、正例 13/13 全注入**。
+//
+//   ★ 间隔只有 0.013 这件事必须摆在明面上：语料再显著增长就得**重跑这两个脚本**
+//     （scripts/calibrate-real.mjs 看整体，scripts/calibrate-thresholds.mjs 逐条看）。
+//     断言写在下面，是为了让"什么时候该重跑"变成一个会红的信号，而不是靠记性。
 const qKnown = scoreQuery(corpus, '如何配置 kubernetes sidecar 注入策略')
 const tKnown = triage(qKnown)
-const KNOWN_RECORDED = 0.1394   // 2026-09-11 在 19 页真实语料上实测
+const KNOWN_RECORDED = 0.1493   // 2026-09-16 在 66 页真实语料上实测（meta 排除 + 标识符缺词折扣）
 console.log('\n已知缺陷用例: bucket=' + tKnown.bucket + ' best=' + tKnown.best + '（记录值 ' + KNOWN_RECORDED + '）')
 check('★ 已知缺陷不再注入整页：通用词重叠查询不得判成 hit',
   tKnown.bucket !== 'hit',
   'bucket=' + tKnown.bucket + ' best=' + tKnown.best + '  （判成 hit 会把无关页面正文注进提示词）')
+check('★ 而且它不该再进 weak（进 weak 也会注入，只是标注低置信）',
+  tKnown.bucket === 'miss',
+  'bucket=' + tKnown.bucket + '  （weak 线是 0.13，记录值 ' + KNOWN_RECORDED + '）')
 check('已知缺陷分数未回升（记录值 ' + KNOWN_RECORDED + '，容差 0.05）',
   tKnown.best <= KNOWN_RECORDED + 0.05,
-  'best=' + tKnown.best + '  （回升说明 maxDfRatio 的过滤失效或语料分布变了，需重跑 calibrate-real.mjs）')
+  'best=' + tKnown.best + '  （回升说明 maxDfRatio / absentRatio 的过滤失效或语料分布变了，需重跑 calibrate-real.mjs）')
+
+// ── 自检索：meta 页不再参与自动注入 ──
+//
+// 这一条守的是上面第 1 条根因。判据刻意用**分数**而不是"池子里有没有它"：
+// 后者是配置问题，前者才是"会不会真的注进提示词"。
+{
+  const qSelf = scoreQuery(corpus, 'Rust 的 borrow checker 报错怎么绕过')
+  const tSelf = triage(qSelf)
+  check('★ 曾经靠"引用标定查询"拿到 0.836 的自检索已消失',
+    tSelf.best < 0.20,
+    'best=' + tSelf.best + ' bucket=' + tSelf.bucket + '  （2026-09-16 修 meta 页之前是 0.8364）')
+  const metaInAuto = corpus.docs.some(d => d.page.id === 'note-ca2525')
+  check('★ meta 页不在自动注入的池里（它仍可被显式 wiki_recall 查到）', !metaInAuto)
+}
 
 // 中文二元组分词确实产出 token
 const zhOnly = scoreQuery(corpus, '数据库崩溃恢复')
@@ -139,6 +187,75 @@ check('seam 返回 html 时自动转文本', htmlSeam.startsWith('yyy') && !html
 
 const noSeam = await fetchUrlText({ web: {} }, 'https://nonexistent.invalid-host-xyz/', { timeoutMs: 3000 })
 check('无 seam 且直连失败时返回空串而非抛异常', noSeam === '', 'got ' + JSON.stringify(noSeam))
+
+
+// ── 引用型页面：判据实测抓到过什么、没抓到什么 ──
+//
+// 这一组的意义不在"功能对不对"，而在**把一次失败的尝试钉在测试里**：
+// 我先假设"负例高分 = 页面引用了标定查询"，写了一个窗口判据，实测**没抓住**，
+// 于是它没有被接进 scoreQuery。不接进来是对的，但那个假设本身值得留档 ——
+// 下一个人（或下一次的我）会先想到同一个办法。
+console.log('\n=== 引用型页面判据 ===')
+{
+  const { looksSelfQuoted } = await import('../lib/recall.js')
+  const tokens = (s) => s.split(/\s+/)
+  // 真·逐字引用：查询词挤在一起
+  const quoted = '前文铺垫 ' + tokens('rust borrow checker 报错 怎么 绕过 的 呢').join(' ') + ' 后文继续'
+  check('★ 逐字引用能被认出来（查询词挤在同一处）',
+    looksSelfQuoted(quoted, ['rust', 'borrow', 'checker', '报错', '怎么', '绕过']) === true)
+  // 散着复述：真实案例的形状 —— 判据**必须**返回 false，否则它就是个误报机器
+  const recounted = '这一页讲的是打分缺陷：' + ['rust', 'borrow'] .join(' ') + ' 在正文里没有；' +
+    '而 报错 怎么 绕过 这些词散落在很长的正文里，中间隔着几百个别的词，' +
+    '再往后才是 复述 一遍 的 内容 和 更多 无关 的 段落 以及 其他 说明 文字 若干 若干 若干。'
+  check('★ 散着复述抓不到 —— 这正是它**没有**被接进 scoreQuery 的原因',
+    looksSelfQuoted(recounted, ['rust', 'borrow', '报错', '怎么', '绕过', '复述']) === false)
+  check('短查询不判定（证据不足时不动手）',
+    looksSelfQuoted('a b c', ['a', 'b']) === false)
+  check('空输入不炸', looksSelfQuoted('', []) === false && looksSelfQuoted(null, ['a']) === false)
+}
+
+// ── 配置键：DEFAULTS 必须是**唯一真源**，代码读的每个键都得在这里 ──
+//
+// ★ 这条是补一个真实缺陷时加的：acquire.js 读了 cfg.normalizeSearchQuery，
+//   而 DEFAULTS 里根本没有这个键 —— 于是"关掉查询清洗"这个开关**只存在于代码里**，
+//   写进 wiki.config.json 也不会有任何效果，而且不报错。
+//
+//   判据刻意做成**双向**的：既要"读到的键都声明过"（防上面那种幽灵开关），
+//   也要"声明过的键都被读过"（防删代码后留下的死配置）。后者放宽成警告 ——
+//   有些键是给界面或外部脚本用的，不一定被 lib/ 直接读。
+console.log('\n=== 配置键 ===')
+{
+  const { DEFAULTS } = await import('../lib/config.js')
+  const { readdir, readFile } = await import('node:fs/promises')
+  const { join } = await import('node:path')
+  const libDir = new URL('../lib/', import.meta.url)
+  const files = (await readdir(libDir)).filter(f => f.endsWith('.js') && f !== 'config.js')
+  const read = new Map()   // key -> 第一次见到的 "文件:行"
+  for (const f of files) {
+    const src = await readFile(join(libDir.pathname.replace(/^\//, ''), f), 'utf8')
+    src.split('\n').forEach((line, i) => {
+      for (const m of line.matchAll(/cfg\.([A-Za-z_$][\w$]*)/g)) {
+        if (!read.has(m[1])) read.set(m[1], f + ':' + (i + 1))
+      }
+    })
+  }
+  check('扫到了代码里读取的配置键', read.size > 20, 'n=' + read.size)
+  // 两个允许的例外，都是 loadConfig **计算**出来而不是默认值里写着的：
+  //   wikiRoot —— override/fileCfg 合并的结果
+  //   __log    —— 界面/工具把 logger 传进配置对象时的内部接缝
+  // 想再加例外之前先问一句：这个键真的不属于 DEFAULTS 吗？
+  // （normalizeSearchQuery 就是"以为是例外、其实是漏声明"，被这条断言抓出来的。）
+  const documented = new Set(Object.keys(DEFAULTS).concat(['wikiRoot', '__log']))
+  const ghosts = [...read.keys()].filter(k => !documented.has(k)).sort()
+  check('★ 代码读的每个配置键都在 DEFAULTS 里声明过（否则那个开关只存在于代码里）',
+    ghosts.length === 0,
+    ghosts.length ? ghosts.map(k => k + ' @ ' + read.get(k)).join(', ') : '全部 ' + read.size + ' 个已声明')
+  const unused = Object.keys(DEFAULTS).filter(k => !read.has(k)).sort()
+  // 只提醒不判红：有些键是给界面/外部脚本用的。但**必须说出来** ——
+  // 一条静默删掉的配置项，和一条静默失效的配置项一样难查。
+  console.log('  note   未被 lib/ 直接读取的键 ' + unused.length + ' 个' +
+    (unused.length ? '：' + unused.slice(0, 12).join(', ') + (unused.length > 12 ? ' …' : '') : ''))
+}
 
 // ── 注入块不得进入检索查询 ──
 // 注入的是"系统说的话"，不是"用户问的问题"。混进去会污染打分，
