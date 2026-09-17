@@ -79,8 +79,13 @@ function buildUserMessage(text, source) {
  * ★ **唯一真源**：package.json 的 peerDependencies 是给人看的，这里是给运行时判的。
  *   两处不一致就会得出相反的结论 —— 这个项目为「阈值两处各写一份」栽过一次
  *   （见 lib/config.js 里 recall 阈值那段注释）。
+ *
+ * 这里用展开形 >=0.1.5-rc.1 <0.2.0-0 —— 它正是 node-semver 对 ^0.1.5-rc.1
+ * （peerDependencies 里那个字符串）的展开。本插件的极简比较器只支持 >=/< 等，
+ * 不解析 ^（遇到返回 null「判不了」），而判据必须以 node-semver 为准：
+ * 0.1.0 元组的 rc 版（如 0.1.0-rc.8）不满足 ^0.1.5-rc.1，pnpm 会因此另装旧副本。
  */
-const HOST_RANGE = '>=0.1.0-rc.6 <0.2.0'
+const HOST_RANGE = '>=0.1.5-rc.1 <0.2.0-0'
 
 function delegationDepth(agent) {
   try {

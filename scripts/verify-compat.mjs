@@ -42,13 +42,18 @@ console.log('── 版本比较（prerelease 必须按数字）──')
 // ── 2. 范围判定 ──
 console.log('')
 console.log('── 范围判定 ──')
-const RANGE = '>=0.1.0-rc.6 <0.2.0'
+const RANGE = '>=0.1.5-rc.1 <0.2.0-0'   // node-semver 对 peerDependencies 里 ^0.1.5-rc.1 的展开
 {
-  check('rc.6 在内', satisfies('0.1.0-rc.6', RANGE) === true)
-  check('rc.8 在内（插件自带的那份）', satisfies('0.1.0-rc.8', RANGE) === true)
-  check('rc.12 在内（宿主在跑的那份）', satisfies('0.1.0-rc.12', RANGE) === true)
-  check('★ 0.2.0 在外', satisfies('0.2.0', RANGE) === false)
-  check('★ rc.5 在外（下界是闭的，rc.5 < rc.6）', satisfies('0.1.0-rc.5', RANGE) === false)
+  check('0.1.5-rc.1 本身在内（下界是闭的）', satisfies('0.1.5-rc.1', RANGE) === true)
+  check('0.1.5-rc.2 在内（宿主当前在跑的那份）', satisfies('0.1.5-rc.2', RANGE) === true)
+  check('0.1.5-rc.12 在内（宿主将来的 patch）', satisfies('0.1.5-rc.12', RANGE) === true)
+  check('★ 0.1.0-rc.8 在外（0.1.0 元组 ≠ 0.1.5 —— 正是 pnpm 会另装旧副本的根源）', satisfies('0.1.0-rc.8', RANGE) === false)
+  check('★ 0.1.0-rc.6 在外（同上的元组规则）', satisfies('0.1.0-rc.6', RANGE) === false)
+  check('★ 0.1.5-rc.0 在外（下界是闭的，rc.0 < rc.1）', satisfies('0.1.5-rc.0', RANGE) === false)
+  check('★ 0.1.4-rc.99 在外（元组在下界之下）', satisfies('0.1.4-rc.99', RANGE) === false)
+  check('★ 0.2.0 在外（上界是 <0.2.0-0）', satisfies('0.2.0', RANGE) === false)
+  check('★ 0.2.0-0 在外（上界对 prerelease 也闭）', satisfies('0.2.0-0', RANGE) === false)
+  check('★ 0.2.0-alpha.1 在外（大于 0.2.0-0）', satisfies('0.2.0-alpha.1', RANGE) === false)
   check('★ 不支持的语法返回 null（"判不了"），不是猜一个答案',
     satisfies('0.1.0', '^0.1.0') === null && satisfies('0.1.0', '0.1.0 || 0.2.0') === null)
   check('空范围返回 null', satisfies('0.1.0', '') === null)
@@ -152,17 +157,17 @@ console.log('── 报告 ──')
 {
   const r1 = compatReport({
     pluginVersions: { '@deepseek-ai/dsh-tools': '0.1.0-rc.8', '@deepseek-ai/dsh-llm': '0.1.0-rc.8' },
-    hostVersions: { app: '0.1.0-rc.12', path: 'x', '@deepseek-ai/dsh-tools': '0.1.0-rc.12', '@deepseek-ai/dsh-llm': '0.1.0-rc.12' },
+    hostVersions: { app: '0.1.5-rc.12', path: 'x', '@deepseek-ai/dsh-tools': '0.1.5-rc.12', '@deepseek-ai/dsh-llm': '0.1.5-rc.12' },
     range: RANGE,
   })
   check('★ 不一致被标出来', r1.differs.length === 2, JSON.stringify(r1.differs.map(d => d.name)))
   check('★ 报告里只有模块，app/path 不许混进来',
     r1.rows.every(x => WATCHED.includes(x.name)), JSON.stringify(r1.rows.map(x => x.name)))
   check('渲染里带 ★ 标记（日志是给人扫的）', /★/.test(r1.rendered))
-  check('★ 范围判两次：插件自带那份（rc.8）在范围内',
-    r1.inRange === true, 'rc.8 在范围内 -> true')
+  check('★ 范围判两次：插件自带那份 rc.8 是 0.1.0 元组 → 超出范围（旧副本被报出来了）',
+    r1.inRange === false, 'rc.8 超出范围 -> false')
   check('★ 同时判宿主那份 —— 第一版漏了它，于是"宿主越界"根本看不见',
-    r1.hostInRange === true, 'rc.12 在范围内 -> true')
+    r1.hostInRange === true, '宿主 0.1.5-rc.12 在范围内 -> true')
   check('声明范围写进渲染', r1.rendered.includes(RANGE))
 
   // ★ 未知不许当成一致
@@ -178,13 +183,13 @@ console.log('── 报告 ──')
     r2.hostInRange === null, String(r2.hostInRange))
 
   const r3 = compatReport({
-    pluginVersions: { '@deepseek-ai/dsh-tools': '0.1.0-rc.8' },
-    hostVersions: { app: '0.1.0-rc.12', '@deepseek-ai/dsh-tools': '0.2.0' },
+    pluginVersions: { '@deepseek-ai/dsh-tools': '0.1.5-rc.2' },
+    hostVersions: { app: '0.1.5-rc.2', '@deepseek-ai/dsh-tools': '0.2.0' },
     range: RANGE,
   })
   check('★ 宿主越过上界时明确报出（rc 阶段的破坏性变更要在日志里被看见）',
     r3.hostInRange === false && /超出范围/.test(r3.rendered), r3.rendered.split('\n').pop())
-  check('★ 而插件自带那份仍在范围内 —— 两个判定含义不同，不能混成一个',
+  check('★ 而插件那份仍在范围内 —— 两个判定含义不同，不能混成一个',
     r3.inRange === true, '单看插件那份会得出"没问题"的结论')
 
   check('完全一致时 differs 为空', compatReport({
