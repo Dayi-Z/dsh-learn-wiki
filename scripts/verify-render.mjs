@@ -647,6 +647,20 @@ console.log('── 模型页签 / 提炼按键 ──')
     hHtml.includes('会问：') && hHtml.includes('p2/m2'), hHtml.slice(0, 0) || '')
   check('★ 显示上一次提炼的结果（含"未产出"这种正常结果）',
     hHtml.includes('上次：') && hHtml.includes('没有值得留的'))
+
+  // ★ 取材失败必须与"未产出"**分开说**。
+  //   "未产出"是模型看完说"没什么可留的"（正常结论）；
+  //   取材失败是这次提炼根本没跑成（故障）。把后者塞进前者的措辞里，
+  //   等于让人以为功能是好的 —— 这正是 2026-09-17 那条静默失效的形态。
+  const failState = makeState({})
+  failState.llm = {
+    mode: 'rotate', onError: 'next', models: [{ provider: 'p1', model: 'm1' }], sites: {}, siteList: [],
+    lastHarvest: { at: '2026-01-01T00:00:00Z', target: 'session://abc', failed: true, skipped: true, staged: 0, reason: '读不到当前会话的事件' },
+  }
+  const fHtml = renderToStaticMarkup(h(C.HarvestSection, { state: failState }))
+  check('★ 取材失败渲染成"失败"，不许混成"未产出"',
+    fHtml.includes('取材失败') && !fHtml.includes('未产出'),
+    fHtml.includes('取材失败') ? '' : '没找到"取材失败"')
 }
 
 // ── 5. 诚实性 ──

@@ -36,6 +36,7 @@ import { createCapabilityManager, loadCatalogSnapshot } from './lib/capabilities
 import { loadUsage, updateUsage, recordHit, recordConfirmed, recordSuspect, usageLabel, classify, shouldQuarantine, reinforcementFactor, DEFAULT_POLICY } from './lib/usage.js'
 import { createSkillInventory, scopeKeyOf } from './lib/skills.js'
 import { createHindsightCompactor } from './lib/hindsight-compact.js'
+import { createPreStepOrder } from './lib/pre-step-order.js'
 import { registerTools } from './lib/tools.js'
 
 export const name = 'dsh-learn-wiki'
@@ -206,6 +207,14 @@ let compactUnrecognizedLogged = 0
 // 一次性探针的闸（见 pre-step 里那段注释）。它只回答一个问题：
 // 这个钩子拿到的 decision.messages 里到底有没有那个注入块。
 let boundedProbeDone = false
+
+// 链头提升本身的状态在 lib/pre-step-order.js（那边有断言）。这里只留"事后验证"用的：
+//   compactSeenBlock —— 提到链头之后**是否真的看到过**注入块
+//   compactPromotedSteps / compactVerityLogged —— 连续若干步都没看到就如实记一次：
+//     "提上去了但依然没见到块"和"提上去就好了"必须分得开，不能默认修好了。
+let compactSeenBlock = false
+let compactPromotedSteps = 0
+let compactVerityLogged = false
   const getCfg = async () => {
     const c = await loadConfig(baseRoot, pluginConfig)
     Object.assign(liveCfg, c)
@@ -608,6 +617,13 @@ let boundedProbeDone = false
               maxTokens: cfg.harvestMaxTokens,
               log,
             })
+            // ★ 取材失败 ≠ 会话没什么可提炼的。前者是故障，必须让界面看见。
+            if (res.failed) {
+              lastHarvest = { at: new Date().toISOString(), target: targetLabel, failed: true, reason: res.reason, staged: 0, transcriptChars: 0 }
+              log('ui: 提炼取材失败（' + targetLabel + '）：' + res.reason + ' via=' + (res.diag?.via ?? '?'))
+              send(500, { ok: false, error: res.reason, diag: res.diag, target: targetLabel })
+              return
+            }
             if (res.skipped) {
               lastHarvest = { at: new Date().toISOString(), target: targetLabel, skipped: true, reason: res.reason, staged: 0, transcriptChars: res.transcriptChars }
               log('ui: 提炼未产出（' + targetLabel + '）：' + res.reason)
@@ -899,7 +915,37 @@ let boundedProbeDone = false
   })
 
   // ── 旋钮 A：工作前自动注入（命中则注入；未命中则记 gap）──
-  ctx.on('agent/pre-step', async ({ agent, messages, step, signal }, next) => {
+  //
+  // ★ 为什么要写成「先普通注册，第一次触发时把自己提到链头」（2026-09-17）——
+  //
+  //   挂在本钩子末尾的那段「压缩 Hindsight 注入块」从 2026-09-10 起再没生效过。
+  //   根因不是消息形状，是**链路顺序**：
+  //
+  //     hindsight-coding-agents 也注册 agent/pre-step，且带 { prepend: true }；
+  //     cordis 的 prepend 就是 unshift（后注册的排最前），而它在 profile 的 bundle
+  //     列表里排在本插件**之后**（第 12 位 vs 第 6 位）。于是链序 = [hindsight, 本插件]。
+  //     而 waterfall 是外层先跑、next() 拿下游结果、再后处理（cordis dispatch/waterfall；
+  //     dsh-agent-loop 的 preStep 调它）。Hindsight 把注入块 append 进 decision 是在**它拿到
+  //     next() 结果之后**：
+  //
+  //       async preStep({ agent, signal }, next) {
+  //         const decision = await next()        // ← 先跑下游（含本插件）
+  //         ...
+  //         return { kind:'enter', messages: [...decision.messages, injectionMessage(injection)] }
+  //       }
+  //
+  //     所以只要本插件在它下游，压缩**结构上**永远看不到那个块。
+  //     实测（一次性探针）：decision.messages 有 3 条、含 hindsight 块=false。
+  //
+  //   给自己也加 prepend 解决不了：注册时机更早，Hindsight 后来的 unshift 仍会排到前面。
+  //   所以改成**第一次触发时就地重挂** —— 那一刻所有插件都已 apply 完毕，unshift 必然落到链头。
+  //   重挂是安全的：dispatch() 每次都用 filter/map **新建**回调数组，改注册表不影响正在跑的这条链。
+  //   提升逻辑在 lib/pre-step-order.js：**提出来是为了能断言** —— 埋在闭包里就测不到，
+  //   而"顺序没排对"恰恰是这一路静默失效的形态。
+  const preStepOrder = createPreStepOrder({
+    ctx,
+    log,
+    body: async ({ agent, messages, step, signal }, next) => {
     // let（不是 const）：压缩 hindsight 块时要替换整个决策对象
     let decision = await next()
     let cfg
@@ -930,16 +976,37 @@ let boundedProbeDone = false
           if (Array.isArray(c)) return 'array(' + c.map(p => (p && p.type) || (p && typeof p.text === 'string' ? 'text-no-type' : '?')).join('/') + ')'
           return c === undefined ? 'none' : typeof c
         }).join(', ') : 'no-array'
-        log('probe: pre-step decision 有 ' + (msgs ? msgs.length : 0) + ' 条消息；'
+        // ★ 这行永远跑在**提升之前**（它是本次调用的开头，而链头提升要到下一次派发
+        //   才生效），所以「含 hindsight 块」在这里**必然**是 false —— 那正是当初
+        //   要确认的事实（钩子在下游）。措辞里写明是提升前快照，免得下一次读日志的人
+        //   把它当成「现在还是坏的」。提升后是否真的看到块，由 compact: ✓ / ★ 两行回答。
+        log('probe: pre-step（链头提升前的快照）有 ' + (msgs ? msgs.length : 0) + ' 条消息；'
           + '含 hindsight 块=' + hasBlock + '；形状=' + shapes
           + '；decision 键=' + Object.keys(decision || {}).join(','))
       } catch (e2) { log('probe failed (non-fatal): ' + (e2?.message ?? e2)) }
     }
 
     // 用户新提示词到达 = 新任务，上一轮的挣扎不该污染这一次的判定
-    // 压缩 hindsight 注入块：它在 prepend 的钩子里已进入批次，这里后处理
+    // 压缩 hindsight 注入块：它在**上游**那个（prepend 的）钩子里才进入批次，
+    // 所以这段代码只有在链路顺序正确时才看得见东西 —— 见本钩子开头的长注释。
     if (liveCfg.compactHindsightBlock !== false && decision.messages?.length) {
       const c = compactHindsight(decision.messages)
+      // ★ 顺序修好没有，要**用事实**回答，不能默认。
+      //   提上链头之后：changed / unrecognized 任一出现 = 真的看到块了。
+      //   连续 COMPACT_VERIFY_STEPS 步都没见到 -> 如实记一次（区分
+      //   "提上去就好了" 与 "提上去了但依然没见到"），然后不再吭声。
+      if (c.changed || c.unrecognized > 0) compactSeenBlock = true
+      compactPromotedSteps++
+      if (preStepOrder.atHead && !compactSeenBlock && !compactVerityLogged && compactPromotedSteps >= 5) {
+        compactVerityLogged = true
+        log('compact: ★ 已提到链头，但连续 ' + compactPromotedSteps + ' 步都没看到注入块 —— '
+          + '要么本会话确实没注入，要么顺序仍未修好（别把它当成修好了）')
+      }
+      if (preStepOrder.atHead && compactSeenBlock && !compactVerityLogged) {
+        compactVerityLogged = true
+        log('compact: ✓ 提到链头后确实看到了注入块（顺序问题已修好）；本次 changed=' + c.changed
+          + ' unrecognized=' + c.unrecognized)
+      }
       if (c.changed) {
         decision = { ...decision, messages: c.messages }
         log('compact: hindsight 注入块已压缩为指针')
@@ -1093,7 +1160,11 @@ let boundedProbeDone = false
       log('pre-step recall failed (non-fatal):', e?.message ?? e)
       return decision
     }
+  },
   })
+  // 先按普通顺序登记（此刻 prepend 也会被 Hindsight 后来居上，见上面的长注释），
+  // 第一次触发时它自己会重挂到链头。
+  preStepOrder.register()
 
   // ── 旋钮 B2：轮次结束后后台补料（非阻塞）──
   const scheduleAcquire = () => {

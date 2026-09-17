@@ -225,7 +225,11 @@ console.log('=== 取材规则：实时与历史必须同一套 ===')
 const tr = sessionTranscript(ev, {})
 check('★ sessionTranscript 与 wiki_harvest 用的是同一个函数', tr.text.includes('分帧') && !tr.text.includes('注入块'))
 const { extractSessionText } = await import('../lib/harvest.js')
-const live = extractSessionText({ id: 'sess-aaa', session: { events: ev } }, {})
+// ★ 会话对象按宿主 `export class Session` 的声明造，**不是** `{ events }`。
+//   旧写法复述的是我们自己代码的假设，而不是宿主的形状 ——
+//   于是 2026-09-17 查实的那条静默失效（真宿主没有 events，取材恒为 0 字符）
+//   在这条"实时与历史必须同一套"的断言底下安然躺了很久。
+const live = extractSessionText({ id: 'sess-aaa', session: { header: { id: 'sess-aaa' }, get id() { return 'sess-aaa' }, snapshotEvents: () => ev, ownEvents: () => ev } }, {})
 check('★ 实时路径与历史路径给出**逐字相同**的文本（否则同一段对话两条路会提炼出不同东西）',
   live.text === tr.text, JSON.stringify({ live: live.text.slice(0, 60), hist: tr.text.slice(0, 60) }))
 check('实时路径带 session:// 锚点', live.sessionRef === 'session://sess-aaa')

@@ -1426,7 +1426,15 @@ window.__ModuleLoader__.load({
         last
           ? h('div', { className: 'lw-ml-note' },
               '上次：' + when(last.at) + ' · ' + (last.target || '—') + ' · '
-              + (last.skipped ? ('未产出（' + (last.reason || '') + '）') : ('产出 ' + num(last.staged) + ' 页' + (last.duplicates ? '，重复 ' + num(last.duplicates) : ''))))
+              // ★ 取材失败单独说：它和"未产出"不是一回事。
+              //   "未产出"是模型看完说"没什么可留的"（正常结论）；
+              //   取材失败是**这次提炼根本没跑成**（故障）。
+              //   把后者塞进前者的措辞里，等于让人以为功能是好的。
+              + (last.failed
+                  ? ('取材失败（' + (last.reason || '') + '）—— 这次提炼**没有真的发生**，不是"没什么可留的"')
+                  : last.skipped
+                    ? ('未产出（' + (last.reason || '') + '）')
+                    : ('产出 ' + num(last.staged) + ' 页' + (last.duplicates ? '，重复 ' + num(last.duplicates) : ''))))
           : null,
         msg ? h('div', { className: 'lw-msg ' + (msg.ok ? 'ok' : 'err') }, msg.text) : null
       )

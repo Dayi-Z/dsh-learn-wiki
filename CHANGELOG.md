@@ -9,6 +9,96 @@
 
 ### 修复
 
+- **「提炼这段对话」恒为 0 字符**（静默失效，2026-09-17 查实）。取材读的是
+  `agent.session.events`，而宿主的 `Session` 类**根本没有这个成员** —— 它声明的是
+  `snapshotEvents()` / `ownEvents()` / `eventAt(seq)`。
+  - 后果：`Array.isArray(undefined)` 为假 → events 恒为空数组 → 取材恒为 **0 字符**，
+    而工具回的是 `ok:true` + 「会话内容太少，不值得提炼（至少 200 字符）」+「这是正常的」。
+    一条**故障伪装成了一个业务结论**：从行为上说，"这段对话没什么可留的"与
+    "我根本没读到这段对话"完全相反，旧代码却把它们合并成同一句话。
+  - 证据：真宿主里一次调用 `transcriptChars=0`，而同一段对话按会话 id 从磁盘提炼
+    有 3591 字符；另用宿主**自己的** `Session` 类灌真事件复现，`'events' in session` 为 false。
+  - 改法：按 `snapshotEvents()` → `ownEvents()` → 旧 `events` 属性取。
+    顺序有意为之：`snapshotEvents()` 给整条日志，`ownEvents()` 只给 fork 之后属于本会话的
+    那一段，用它取会**丢掉继承的历史**，所以只能是退路。走的是哪一条每次都记进日志（`via`）。
+  - ★ **「读不到」与「没内容」从此分开报**：读不到返回 `failed:true` 并说明缺的是哪个接口，
+    工具、界面、日志三处都按**故障**呈现，不再落进"正常拒绝"的措辞里。
+  - ★ 顺带修掉造成这条静默失效的**测试夹具**：它写的是 `session: { events }` ——
+    复述的是**代码的假设**，不是宿主的形状。于是自检全绿而功能是坏的。
+    现在夹具按宿主 `export class Session` 的声明造，并**拿真 Session 类对质**：
+    真类连装都不让装的夹具就是错的（`id`、`message.source.kind='model'`、
+    `stream` 是数组 —— 这三个字段都是对手质时才暴露出来的）。
+
+- **压缩 Hindsight 注入块从 2026-09-10 起再没生效过 —— 根因是钩子链路顺序，不是消息形状**。
+  探针（`52ed8a7` 埋的一次性日志）在重启后给出了答案：`decision.messages` 有 3 条、
+  **含 hindsight 块=false**。也就是说钩子在跑，但它**结构上**看不到该压的块。
+  - 逐行读出来的机制：`hindsight-coding-agents` 也注册 `agent/pre-step`，且带
+    `{ prepend: true }`；cordis 里 prepend 就是 **unshift**（后注册的排最前，
+    见 cordis lib `register()`），而它在 profile 的 bundle 列表里排在本插件**之后**
+    （第 12 位 vs 第 6 位）。于是链序 = `[hindsight, 本插件]`。
+  - 而 cordis 的 waterfall 是「外层先跑、`next()` 拿下游结果、再后处理」
+    （`const next = () => (cbs.shift() ?? inner)(...args)`），dsh-agent-loop 的 `preStep` 调它。
+    Hindsight 的手册写法正是先 `await next()` 再
+    `messages: [...decision.messages, injectionMessage(injection)]` —— **块是在它的 `next()`
+    返回之后才 append 的**。所以在下游的钩子永远看不到它，无论形状支持得多全。
+  - ★ 直接给自己也加 `prepend` **解决不了**：本插件注册更早，Hindsight 后来的 unshift
+    仍会把自己排到最前面。改成**第一次触发时就地重挂到链头** —— 那一刻所有插件都已
+    apply 完毕，unshift 必然落到链头。重挂安全：`dispatch()` 每次用 filter/map **新建**
+    回调数组（改注册表不影响正在跑的这条链），且 `ctx.on` 的 listener 会过 `reflect.bind()`
+    生成**新的 Proxy**，两次注册引用不同、注销能落准。
+  - ★ 失败方向是**不对称**的，代码按这个写：先挂新的、成功了再注销旧的 —— 反过来一旦
+    `ctx.on` 抛异常就会一份注册都不剩，整个 pre-step 路径（注入/能力包/技能裁剪/压缩）
+    全哑，比原来的「压不到」严重得多。另留一道去重兜底（同一 payload 只让一份干活），
+    防的是「注销失败 → 同一份跑两次 → 同一段知识被插进上下文两遍」。
+  - ★ **修好没有要用事实回答**：提升后仍连续 5 步没见到块就如实记 `★`，真见到了记 `✓`。
+    一次性探针那行的措辞也改成「链头提升前的快照」—— 它必然报 false，不改措辞就会误导
+    下一个读日志的人。
+  - 提升逻辑提成 **`lib/pre-step-order.js`**（纯接线、可断言），配
+    `scripts/verify-pre-step-order.mjs`：用**照抄 cordis 语义**的假宿主（prepend=unshift、
+    waterfall 逐层、每次新建回调数组）复现故障并证明修复 —— 含"提升前看不到块 / 提升后
+    同一钩子体看到块"、失败时注册不丢、注销失败不重复执行。
+- **取材修好之后紧接着的第二堵墙：模型输出里的思考过程让 JSON 解析恒失败**（2026-09-17）。
+  取材一活，第一次真实调用就报「模型没有返回合法 JSON」—— 原始输出 **10,215 字符**，
+  开头是 `Here's a thinking process:`。
+  - 根因一：**这些推理模型把思考过程写进正文**（本机配的 opencodefree 免费端点不把
+    reasoning 分成独立字段），思考里还常常**逐字复述要求的输出形状**。
+  - 根因二（真正的代码 bug）：`extractJson` 的围栏正则是坏的 ——
+    `(?:json)?s*([sS]*?)` 里的 `s*` 匹配的是**字面 s**、`[sS]` 只匹配 s/S，
+    所以 json 围栏块**永远抠不出来**（除非内容全是 s）；退路「第一个 { 到最后一个 }」
+    又把中间的散文一起切进去，`JSON.parse` 必挂。
+  - 改法：围栏正则改成 `\s*([\s\S]*?)`；新增**配平扫描**——逐个 `{` 找它最短的配平
+    对象（感知字符串转义），在所有可解析候选中取「闭合最靠后、开口最靠前」的那个，
+    即**最外层且最接近末尾**的对象。思考里的示例都在答案前面，答案闭合在最后。
+  - ★ 还踩到一个更阴的形态：思考里带一个**完整可解析**的示例对象（`{"skip": true}`），
+    而真答案恰好**被截断**没有闭合 —— 此时「闭合最靠后」会选中那个示例。
+    所以 `extractJson(text, ok)` 加了可选的**契约校验回调**，harvest/distill 各传自己的形状
+    （harvest：`skip` 是布尔且 `skip:true` 带 `reason`、`skip:false` 带 `items`）。
+    通用函数不内置调用方的契约，但允许调用方用它过滤候选。
+  - ★ **解析失败的诊断必须透传**：`runHarvest` 早就返回了 `rawLength/rawPreview`，
+    但工具层把它们丢了，于是每次失败都只有一句「模型没有返回合法 JSON」，无法区分
+    **截断**（撞 maxTokens）/ **格式**（思考污染）/ **空回复** —— 三种原因的修法完全不同。
+    现在日志同时记**开头和结尾**（结尾缺配平 = 截断；结尾完整 = 格式），工具返回值也带上
+    `rawLength/rawPreview/rawTail`。
+  - 自检补 6 条真实形态夹具：思考过程污染、围栏块、带完整示例对象的污染、被截断、
+    纯散文、空输入。
+
+- **提炼的第三堵墙：候选模型只推理不回答，而「空回复」被当成了成功**（2026-09-17，重启后实测）。
+  解析修好后第一次调用，工具回的是 `{ ok:true, skipped:true, reason:'模型没有返回合法 JSON',
+  transcriptChars:5233, rawLength:0 }` —— 取材 5233 字符（正常），但**模型输出是空的**。
+  - 日志同时印证（新加的「开头+结尾」一起记）：`harvest: 解析失败 len=0 开头="" 结尾=""`。
+    这正是当初注释里预判的第三种原因 —— 但它连「格式问题」都不是。
+  - 根因：宿主的流有**独立的 reasoning 通道**（chunk 类型 `reasoning-delta`，见 dsh-llm 的
+    `assembler.js` / `assistant-stream.js`），而 `llm.chat()` 只累加 `text-delta`。
+    候选把 3000 token 预算全烧在推理上时，正文一个字都没有 —— 旧代码**把空串当成功返回**，
+    于是：轮换白配（不会去试下一个候选），调用方还以为是自己解析格式的问题。
+    实测那次用的是 `opencodefree/deepseek-v4-flash-free`（`tries:1`，即第一个候选就「成功」了）。
+  - 改法：**空回复 = 这次候选失败**，丢进既有的失败路径 —— `onError=next` 会去试下一个模型；
+    全部候选都空才抛，且理由带证据：
+    `空回复（没收到任何 text-delta；只收到 N 字符 reasoning；chunk 类型=reasoning-delta）`。
+  - ★ 刻意**不把 reasoning 内容当正文**：那是草稿不是答案。曾经有过「思考里也带着最终 JSON」的
+    输出（见上面第二堵墙），但把草稿当答案会静默产出没有依据的知识页 —— 宁可吵着失败。
+  - 自检补 2 条（`verify-llm` 第 13 节）：只回 reasoning 的候选被跳过并改用下一个候选；
+    全部空回复时必须抛错，且错误里带上 reasoning 字符数与 chunk 类型。
 - **宿主改了会话文件名，历史从某一天起就不再增长了**（静默失效）。宿主把
   `session.jsonl.zstd` 改成了 **`session.v3.jsonl.zstd`**，而这里用的是**精确字符串匹配**。
   - 实测：磁盘上 2026-09-15 20:30 之后新建的会话全是 vN 命名，
@@ -41,6 +131,10 @@
     实测 388 个定义 / 31 个引用**全部存在**。
 
 ### 新增
+
+- **`scripts/diag-session-shape.mjs`**：把"会话事件的真实形状"打出来
+  （类型直方图、`user/message` 的 `source.kind` 分布、`assistant/message` 有没有 text 段、
+  以及每种事件的样本）。这次的根因就是靠它确定的 —— **别再照着注释猜形状**。
 
 - **压掉 Hindsight 的第二个注入块**（`<hindsight_knowledge_refresh>`）。
   hindsight-coding-agents 0.6.1 起除了开头那次，还会**每 N 轮再注一遍**

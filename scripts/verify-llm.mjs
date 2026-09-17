@@ -24,7 +24,8 @@ const check = (label, ok, detail = '') => {
 // ── 一个假的宿主 ctx.llm ──
 // 记录**每次调用**用了谁，这样"轮换"和"失败换下一个"都是可断言的，
 // 而不是靠肉眼读日志。
-function fakeCtx({ providers = ['p1', 'p2'], models = { p1: ['m1a', 'm1b'], p2: ['m2a'] }, fail = {} } = {}) {
+//   silent：只回 reasoning、正文一个字不给的候选（实测踩到过，见 chat() 里的注释）
+function fakeCtx({ providers = ['p1', 'p2'], models = { p1: ['m1a', 'm1b'], p2: ['m2a'] }, fail = {}, silent = {} } = {}) {
   const calls = []
   return {
     calls,
@@ -35,8 +36,15 @@ function fakeCtx({ providers = ['p1', 'p2'], models = { p1: ['m1a', 'm1b'], p2: 
         calls.push(opts.provider + '/' + opts.model)
         const key = opts.provider + '/' + opts.model
         const boom = fail[key]
+        const mute = silent[key]
         return (async function* () {
           if (boom) throw new Error(boom)
+          if (mute) {
+            // 宿主的流有独立的 reasoning 通道，类型是 'reasoning-delta'
+            // （见 dsh-llm 的 assembler.js / assistant-stream.js）。
+            yield { type: 'reasoning-delta', text: '让我先想想……'.repeat(40) }
+            return
+          }
           yield { type: 'text-delta', text: 'OK:' + key }
         })()
       },
@@ -220,6 +228,31 @@ console.log('=== 12. loadConfig 会把 llm 收敛成可执行形状 ===')
   check('★ loadConfig 出来的 cfg.llm 一定是归一化过的（两处各解一遍就会漂）',
     cfg.llm && cfg.llm.mode === 'single' && Array.isArray(cfg.llm.models) && typeof cfg.llm.sites === 'object',
     JSON.stringify(cfg.llm))
+}
+
+console.log('')
+console.log('=== 13. 空回复 = 失败（不是空成功）===')
+{
+  // 实测（2026-09-17 重启后）：harvest 拿到 len=0 的输出，报「模型没有返回合法 JSON」，
+  // 真相是那个候选把预算全花在 reasoning 上、正文一个字没给。旧代码把它当成功返回，
+  // 于是轮换白配（不会去试下一个候选）。
+  const cfg = { llm: { mode: 'single', onError: 'next', models: ['p1/m1a', 'p2/m2a'] } }
+  {
+    const { llm, calls } = await mkLlm(cfg, { silent: { 'p1/m1a': true } })
+    const text = await llm.chat({ site: 'distill', prompt: 'x' })
+    check('★ 只回 reasoning 的候选被跳过，改用下一个候选', text === 'OK:p2/m2a', text)
+    check('★ 确实问过两个（没有把空回复当成功就收手）', calls.join(',') === 'p1/m1a,p2/m2a', calls.join(','))
+  }
+  {
+    // 所有候选都空 -> 必须抛，且理由点明是空回复、带上证据
+    const { llm } = await mkLlm({ llm: { mode: 'single', onError: 'next', models: ['p1/m1a'] } }, { silent: { 'p1/m1a': true } })
+    let err = null
+    try { await llm.chat({ site: 'distill', prompt: 'x' }) } catch (e) { err = e }
+    check('★ 全部空回复时抛错（不许静默返回空串）', !!err && /空回复/.test(err.message), err ? err.message.slice(0, 120) : 'no error')
+    check('★ 错误里带证据：reasoning 字符数与 chunk 类型',
+      !!err && /reasoning/.test(err.message) && /reasoning-delta/.test(err.message),
+      err ? err.message.slice(0, 160) : 'no error')
+  }
 }
 
 console.log('')
