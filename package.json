@@ -1,6 +1,6 @@
 {
   "name": "dsh-learn-wiki",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "边做边学知识库：CRAG 式纠错检索（L1 Markdown wiki + L2 Hindsight）→ 未命中后台经 L3 限流联网补料 → 蒸馏落 staged → 两段式 commit 升入 L1。",
   "license": "MIT",
   "type": "module",

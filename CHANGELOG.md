@@ -3,7 +3,7 @@
 本文件记录本插件的显著变更。格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [0.3.0] — 2026-09-17
 
 跟着宿主（0.1.5-rc.2 / DSHDesktop 0.9.0）与 Hindsight（0.6.1）对齐的一轮。
 
