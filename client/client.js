@@ -140,7 +140,7 @@ window.__ModuleLoader__.load({
       'box-shadow:var(--dsw-shadow-lv2,0 1px 2px rgba(0,0,0,.20),0 16px 48px rgba(0,0,0,.36))}',
       '.lw-shell{display:flex;flex-direction:column;flex:1;min-height:0;width:100%}',
       '.lw-head{display:flex;align-items:center;gap:9px;padding:0 0 12px}',
-      '.lw-headicon{display:flex;align-items:center;color:var(--lw-fg2)}',
+      '.lw-headicon{display:flex;align-items:center;color:var(--lw-brand)}',
       '.lw-title{font:var(--dsw-font-s-strong-14,600 14px/22px system-ui,sans-serif)}',
       '.lw-path{margin-left:auto;font:var(--dsw-font-xxxs-11,11px/16px system-ui,sans-serif);color:var(--lw-fg4);font-variant-numeric:tabular-nums;',
       'max-width:46%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:rtl;text-align:left}',
@@ -222,6 +222,15 @@ window.__ModuleLoader__.load({
       '.lw-input::placeholder{color:var(--lw-fg4)}',
       '.lw-chip{font:var(--dsw-font-xxxs-11,11px/16px system-ui,sans-serif);padding:1px 7px;border-radius:99px;border:1px solid var(--lw-line);color:var(--lw-fg2);white-space:nowrap}',
       '.lw-chip.lw-on{border-color:var(--lw-brand);color:var(--lw-fg)}',
+// 状态胶囊：给「状态」这一类事实一个统一的视觉语言（点 + 底色 + 描边），
+// 颜色取自语义 token；跳过/已产出/待处理/放弃 一眼可辨，不必读文字。
+'.lw-st{display:inline-flex;align-items:center;gap:5px;padding:1px 8px;border-radius:99px;border:1px solid var(--lw-line);font:var(--dsw-font-xxxs-11,11px/16px system-ui,sans-serif);white-space:nowrap;color:var(--lw-fg2)}',
+'.lw-st .d{width:6px;height:6px;border-radius:99px;background:currentColor;opacity:.85;flex:none}',
+'.lw-st.ok{color:var(--lw-ok);border-color:color-mix(in srgb,var(--lw-ok) 32%,transparent);background:color-mix(in srgb,var(--lw-ok) 9%,transparent)}',
+'.lw-st.warn{color:var(--lw-warn);border-color:color-mix(in srgb,var(--lw-warn) 32%,transparent);background:color-mix(in srgb,var(--lw-warn) 9%,transparent)}',
+'.lw-st.bad{color:var(--lw-bad);border-color:color-mix(in srgb,var(--lw-bad) 32%,transparent);background:color-mix(in srgb,var(--lw-bad) 9%,transparent)}',
+'.lw-st.info{color:var(--lw-info);border-color:color-mix(in srgb,var(--lw-info) 32%,transparent);background:color-mix(in srgb,var(--lw-info) 9%,transparent)}',
+'.lw-st.dim{color:var(--lw-fg4);background:var(--lw-raise)}',
       '.lw-msg{font:var(--dsw-font-xxs-12,12px/18px system-ui,sans-serif);line-height:1.5;padding:8px 10px;border-radius:8px;margin:0 0 12px}',
       '.lw-msg.ok{color:var(--lw-ok);border:1px solid var(--lw-line)}',
       '.lw-msg.err{color:var(--lw-bad);border:1px solid var(--lw-line)}',
@@ -1482,7 +1491,8 @@ window.__ModuleLoader__.load({
           h('div', { className: 'lw-sec-h' },
             h('span', { className: 'lw-sec-t' }, '缺口队列'),
             h('span', { className: 'lw-sec-n' },
-              '待处理 ' + num(gc.pending) + ' · 已产出 ' + num(gc.done) + ' · 放弃 ' + num(gc.skipped))
+              '待处理 ' + num(gc.pending) + ' · 已产出 ' + num(gc.done)
+              + ' · 已跳过 ' + num(gc.skipped) + ' · 放弃 ' + num(gc.abandoned))
           ),
           recent.length ? h('table', { className: 'lw-table' },
             h('colgroup', null,
@@ -1494,9 +1504,17 @@ window.__ModuleLoader__.load({
               h('th', { className: 'lw-th' }, '查询')
             )),
             h('tbody', null, recent.map(function (x, i) {
-              var tone = x.status === 'done' ? 'c-ok' : x.status === 'pending' ? 'c-warn' : 'c-dim'
+              // 状态显示成中文胶囊；原因挂在 title 上（质量闸/蒸馏器为什么拒）。
+              var stl = x.status === 'done' ? ['ok', '已产出']
+                : x.status === 'pending' ? ['info', '待处理']
+                : x.status === 'abandoned' ? ['warn', '放弃']
+                : ['dim', '跳过']
               return h('tr', { key: i, className: 'lw-tr' },
-                h('td', { className: 'lw-td' }, h('span', { className: tone }, x.status)),
+                h('td', { className: 'lw-td' },
+                  h('span', {
+                    className: 'lw-st ' + stl[0],
+                    title: x.lastReason ? ('原因：' + x.lastReason) : (x.lastAttempt ? ('上次尝试 ' + when(x.lastAttempt)) : undefined),
+                  }, h('span', { className: 'd' }), stl[1])),
                 h('td', { className: 'lw-td', title: x.query }, x.query))
             }))
           ) : h('div', { className: 'lw-empty' }, '队列是空的。')

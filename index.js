@@ -754,7 +754,7 @@ let compactVerityLogged = false
             lastHarvest,
           },
           knowledge: { committed, staged, counts, threshold: { hit: cfg.hitThreshold, weak: cfg.weakThreshold } },
-          gaps: { counts: gapCounts, total: gaps.length, recent: gaps.slice(-12).map(g => ({ query: String(g.query).slice(0, 90), status: g.status })) },
+          gaps: { counts: gapCounts, total: gaps.length, recent: gaps.slice(-12).map(g => ({ query: String(g.query).slice(0, 90), status: g.status, ...(g.lastReason ? { lastReason: g.lastReason } : {}), ...(g.lastAttempt ? { lastAttempt: g.lastAttempt } : {}) })) },
           // 分拣计数顺手带上（两次 readdir，可以忽略）。面板打开时 /api/state 每 8 秒
           // 轮询一次，界面据此在页签头上写字。
           triage: { ...triageCounts, total: triageCounts.trash + triageCounts.rejected },

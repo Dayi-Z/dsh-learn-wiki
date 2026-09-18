@@ -110,4 +110,8 @@ check('蒸馏器拒绝 → 未产出页', s2.staged === 0 && after === before, J
 
 await rm(ROOT, { recursive: true, force: true })
 console.log(failures === 0 ? '\nALL PASS — 闭环成立' : '\n' + failures + ' FAILURE(S)')
-process.exit(failures === 0 ? 0 : 1)
+// ★ Windows 上的已知竞态：process.exit() 立即调用时，可能还有句柄处在
+//   UV_HANDLE_CLOSING（close 已发起、回调未跑）状态 → libuv 断言崩溃
+//   （实测偶发，exit -1073740791）。给事件循环一拍跑完 close 回调再退 ——
+//   纯退出时序，不影响任何断言。
+setTimeout(() => process.exit(failures === 0 ? 0 : 1), 100)

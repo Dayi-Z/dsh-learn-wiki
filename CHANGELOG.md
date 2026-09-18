@@ -1,8 +1,40 @@
-# Changelog
-
 本文件记录本插件的显著变更。格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### 新增
+
+- **补料「时机/预算」质量闸**（2026-09 实测：gap 队列 24 条里 16 条 skipped 的根因修复）。
+  问题不是蒸馏器太保守，而是**查询本身不可检索**：DSH 侧脱敏占位符（`<path>`/`<n>`、`https:/<path>`）、
+  终端输出片段（"Press Ctrl+C to quit"）、JSON 转储、DSH 内部契约错误
+  （missing required property / workspace not registered / unknown tool）、
+  "run_code settled"（命令**正常结束**被误当错误）被当成缺口入队 —— 联网+蒸馏必然 skipped，
+  却烧掉每轮 `maxAcquisitionsPerRun`（默认 2）的名额，真缺口反而排队。
+  - `unsearchableGapReason(query)`（lib/acquire.js）：**高精度**模式判定，只收客观无解的。
+    不误杀含脱敏占位符但核心短语可检索的真缺口（"old_string was not found in \"<path>\""
+    知识页有 22 次确认命中，靠的就是这条）。
+  - `appendGap` 入队即预标记：不可检索的直接以 `skipped` + 原因落库（台账照记），永不进 pending。
+  - `runAcquisition` 预算前纵深防御：历史遗留/手工写入的 pending 垃圾在 `slice` 之前挡掉，
+    不联网、不蒸馏。
+  - **seen 优先调度**：预算名额给「反复撞」的缺口（seen 降序），而不是最先登记的那几条。
+  - 新增 `scripts/verify-gap-gate.mjs`（13 断言，夹具取自真实队列）。
+
+### 界面
+
+- **补料队列状态列中文化**（原来直接输出 `done/pending/skipped/abandoned` 英文原始值，
+  中文界面里的刺眼粗点）：状态渲染成 DSH 风格胶囊（圆点 + 底色 + 描边，颜色走既有
+  `--lw-*` 语义 token，`color-mix` 混出边框/底），文案本地化为 已产出/待处理/跳过/放弃。
+  悬停显示 `lastReason`（质量闸/蒸馏器为什么拒），host 侧 `/api/state` 的 `gaps.recent`
+  补带 `lastReason`/`lastAttempt` 字段。
+- **摘要行拆分跳过与放弃**（原来 `放弃` 数错位到 skipped 桶，abandoned 隐形）：
+  `待处理 · 已产出 · 已跳过 · 放弃` 四桶全列。
+- **面板标题图标用品牌色**（原来灰 `--lw-fg2`，与 searchflow 的彩色图标语言对齐）。
+
+### 修复
+
+- **verify-loop 偶发崩溃**（Windows 上 `process.exit` 与 `UV_HANDLE_CLOSING` 句柄竞态，
+  libuv 断言，exit -1073740791）：退出前给事件循环 100ms 宽限跑完 close 回调。
 ## [0.3.0] — 2026-09-17
 
 跟着宿主（0.1.5-rc.2 / DSHDesktop 0.9.0）与 Hindsight（0.6.1）对齐的一轮。
