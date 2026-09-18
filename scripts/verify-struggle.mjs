@@ -151,9 +151,8 @@ console.log('\n=== 症状查询 ===')
 const qWithFail = symptomQuery([{ type: 'edit-churn', file: 'D:/x/client.js', failCount: 2 }])
 check('有失败证据时才说"仍不成功"', /仍不成功/.test(qWithFail), qWithFail)
 const qNoFail = symptomQuery([{ type: 'edit-churn', file: 'D:/x/client.js', failCount: 0 }])
-check('★ 没有失败证据就**不**声称"仍不成功"（原版把这四个字写死了）',
-  !/仍不成功/.test(qNoFail), qNoFail)
-check('症状查询仍然带文件名', /client\.js/.test(qNoFail), qNoFail)
+check('★ 无失败证据 → **不生成查询**（本地文件名不是可检索症状，实测 35 次触发零产出）',
+  qNoFail === '', qNoFail)
 
 // ★ 查询文本不能随计数变化。
 //   同一个坑的第二半：identity 早就改成不带计数了（为了冷却去重），
@@ -171,7 +170,11 @@ check('★ 查询里带错误指纹（这才是可搜的部分）', /WALL_OVERFL
 check('★ 查询里不带计数', !/\d+\s*次失败/.test(q5), q5)
 const rfNoSig = detect(Array.from({ length: 5 }, (_, i) => ev({ tool: 'pwsh', key: 'k' + i, failed: true })), cfg).filter(s => s.type === 'repeat-failure')
 const qNoSig = symptomQuery(rfNoSig)
-check('没有错误指纹时退回工具名，仍然不带计数', /pwsh/.test(qNoSig) && !/\d+\s*次失败/.test(qNoSig), qNoSig)
+check('★ 没有错误指纹 → **不生成查询**（网上没有针对性内容，蒸馏器必然拒绝；省掉联网预算）',
+  qNoSig === '', qNoSig)
+const qCtx = symptomQuery([{ type: 'repeat-failure', count: 3, errorSig: 'Error: WALL_OVERFLOW at <path>' }], '你是研究 agent。任务：去调研 freqtrade')
+check('★ 任务上下文**不进查询**（中文长指令是纯噪声，且会让同一错误的 hash 随任务变化）',
+  !/当前任务/.test(qCtx) && /WALL_OVERFLOW/.test(qCtx), qCtx)
 
 console.log(failures === 0 ? '\nALL PASS — 挣扎检测器判据正确' : '\n' + failures + ' FAILURE(S)')
 process.exit(failures === 0 ? 0 : 1)
